@@ -1,0 +1,776 @@
+import './styles.css';
+import { initCover } from './motion.js';
+import 'leaflet/dist/leaflet.css';
+import { Chart, registerables } from 'chart.js';
+import L from 'leaflet';
+import { createAmapMap, destroyAmapMap } from './map/amap-map.js';
+import {
+  Activity, ArrowRight, Bell, Bot, CalendarDays, ChartNoAxesColumnIncreasing,
+  Check, ChevronLeft, ChevronRight, ChevronsUpDown, CircleAlert, CircleCheck,
+  CircleCheckBig, ClipboardClock, ClipboardList, Clock3, CloudOff, CopyCheck, Cpu,
+  Download, ExternalLink, FileCheck2, ImageUp, Info, LayoutDashboard,
+  ListRestart, LoaderCircle, LocateFixed, LockKeyhole, Map, MapPin, Menu, Plus,
+  PlugZap, RefreshCw, ScanLine, ScanSearch, ScrollText, Search, Send, Server,
+  Settings, ShieldCheck, TriangleAlert, UploadCloud, UserRoundPlus, Users,
+  Waves, X, createIcons,
+} from 'lucide';
+import { createPlatformClient } from './api/client.js';
+import { createFastApiClient } from './api/fastapi-client.js';
+import { createLlmClient } from './api/llm-client.js';
+import { createMockClient } from './api/mock-client.js';
+import { filterTasks, summarizeTasks } from './domain/task-query.js';
+
+Chart.register(...registerables);
+
+const icons = {
+  Activity, ArrowRight, Bell, Bot, CalendarDays, ChartNoAxesColumnIncreasing,
+  Check, ChevronLeft, ChevronRight, ChevronsUpDown, CircleAlert, CircleCheck,
+  CircleCheckBig, ClipboardClock, ClipboardList, Clock3, CloudOff, CopyCheck, Cpu,
+  Download, ExternalLink, FileCheck2, ImageUp, Info, LayoutDashboard,
+  ListRestart, LoaderCircle, LocateFixed, LockKeyhole, Map, MapPin, Menu, Plus,
+  PlugZap, RefreshCw, ScanLine, ScanSearch, ScrollText, Search, Send, Server,
+  Settings, ShieldCheck, TriangleAlert, UploadCloud, UserRoundPlus, Users,
+  Waves, X,
+};
+
+const apiMode = import.meta.env.VITE_API_MODE || 'fastapi';
+const mockApi = createMockClient();
+const api = apiMode === 'api'
+  ? createPlatformClient({ baseUrl: import.meta.env.VITE_PLATFORM_API_BASE_URL || '/api' })
+  : apiMode === 'fastapi'
+    ? createFastApiClient({
+      baseUrl: import.meta.env.VITE_FASTAPI_BASE_URL || 'https://10776c44.r21.cpolar.top',
+      processPath: import.meta.env.VITE_FASTAPI_PROCESS_PATH || '/process',
+      fileField: import.meta.env.VITE_FASTAPI_FILE_FIELD || 'file',
+      healthPath: import.meta.env.VITE_FASTAPI_HEALTH_PATH || '/health',
+      bootstrapClient: mockApi,
+    })
+    : mockApi;
+const llmMode = import.meta.env.VITE_LLM_MODE || 'proxy';
+const llm = llmMode === 'off'
+  ? null
+  : createLlmClient({
+    baseUrl: import.meta.env.VITE_LLM_PROXY_BASE_URL || import.meta.env.VITE_PLATFORM_API_BASE_URL || '/api',
+    analyzePath: import.meta.env.VITE_LLM_ANALYZE_PATH || '/llm/analyze',
+  });
+const mapProvider = import.meta.env.VITE_MAP_PROVIDER || 'amap';
+const amapKey = import.meta.env.VITE_AMAP_KEY || '';
+const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || '';
+
+const app = document.querySelector('#app');
+const chartInstances = [];
+let mapInstance = null;
+let amapMapInstance = null;
+let mapRenderToken = 0;
+let selectedTaskId = null;
+
+const state = {
+  view: 'dashboard',
+  loading: true,
+  navOpen: false,
+  data: null,
+  filters: { keyword: '', risk: '', status: '', category: '' },
+  mapFilters: { segment: '', risk: '', status: '' },
+  mapFocusTaskId: null,
+};
+
+const navItems = [
+  { id: 'dashboard', label: '调度总览', icon: 'layout-dashboard' },
+  { id: 'report', label: '新建上报', icon: 'upload-cloud' },
+  { id: 'tasks', label: '任务与处置', icon: 'clipboard-list', badge: '8' },
+  { id: 'map', label: '河道地图', icon: 'map' },
+  { id: 'statistics', label: '数据统计', icon: 'chart-no-axes-column-increasing' },
+  { id: 'admin', label: '系统管理', icon: 'settings' },
+];
+
+const viewMeta = {
+  dashboard: ['调度总览', '聚焦异常、风险和待办，让处置节奏保持清晰。'],
+  report: ['新建巡河上报', '一张照片建立一个识别任务，位置与时间由上报人最终确认。'],
+  tasks: ['任务与处置', '查询分析任务，完成复核、派单、清理与核验闭环。'],
+  map: ['河道态势地图', '按风险和处置状态查看已确认坐标的现场点位。'],
+  statistics: ['数据统计', '观察上报趋势、垃圾构成与处置履约情况。'],
+  admin: ['系统管理', '维护河段、账号与仅服务端可见的模型集成状态。'],
+};
+
+function esc(value = '') {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function icon(name, size = 18) {
+  return `<i data-lucide="${name}" width="${size}" height="${size}" aria-hidden="true"></i>`;
+}
+
+function statusTone(value) {
+  if (['高', '紧急', '已逾期', '失败'].includes(value)) return 'danger';
+  if (['中', '高', '待核查', '待派单', '待核验'].includes(value)) return 'warning';
+  if (['低', '已完成', '已清理', '正常', '启用'].includes(value)) return 'success';
+  if (['处理中', '清理中', '已派单', '运行中'].includes(value)) return 'info';
+  return 'neutral';
+}
+
+function badge(value, extra = '') {
+  return `<span class="badge badge-${statusTone(value)} ${extra}"><span class="badge-dot"></span>${esc(value)}</span>`;
+}
+
+function progressRing(value, label, color = '#2dd4a7') {
+  return `<div class="progress-ring" style="--progress:${value * 3.6}deg;--ring-color:${color}">
+    <div><strong>${value}%</strong><span>${label}</span></div>
+  </div>`;
+}
+
+function shell(content) {
+  const [title, subtitle] = viewMeta[state.view];
+  const user = state.data?.currentUser;
+  return `
+    <div class="app-shell ${state.navOpen ? 'nav-is-open' : ''}">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <span class="brand-mark">${icon('waves', 24)}</span>
+          <span><strong>清川</strong><small>河道智治平台</small></span>
+        </div>
+        <nav class="nav-list">
+          <p class="nav-section">工作台</p>
+          ${navItems.slice(0, 4).map(navItem).join('')}
+          <p class="nav-section">洞察与管理</p>
+          ${navItems.slice(4).map(navItem).join('')}
+        </nav>
+        <div class="side-service">
+          <div class="service-heading"><span class="pulse-dot"></span>系统服务正常</div>
+          <div class="service-row"><span>任务 Worker</span><strong>运行中</strong></div>
+          <div class="service-row"><span>队列</span><strong>2 项</strong></div>
+        </div>
+        <button class="profile-block" data-action="profile" type="button">
+          <span class="avatar">${esc(user?.initials || '调')}</span>
+          <span><strong>${esc(user?.name || '调度员')}</strong><small>${esc(user?.role || '')}</small></span>
+          ${icon('chevrons-up-down', 16)}
+        </button>
+      </aside>
+      <button class="sidebar-scrim" data-action="close-nav" aria-label="关闭导航"></button>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="page-heading">
+            <button class="icon-button mobile-menu" data-action="toggle-nav" title="打开导航" aria-label="打开导航">${icon('menu')}</button>
+            <div><h1>${title}</h1><p>${subtitle}</p></div>
+          </div>
+          <div class="top-actions">
+            <div class="global-search">${icon('search', 17)}<input type="search" data-global-search placeholder="搜索任务、河段或人员" aria-label="全局搜索"/><kbd>⌘ K</kbd></div>
+            <button class="icon-button notification-button" data-action="notifications" title="通知" aria-label="通知">${icon('bell')}<span></span></button>
+            <button class="button button-primary desktop-create" data-view="report">${icon('plus', 17)}新建上报</button>
+          </div>
+        </header>
+        <main class="main-content">${content}</main>
+      </div>
+    </div>
+    <div id="overlay-root"></div>
+    <div class="toast-region" aria-live="polite"></div>`;
+}
+
+function navItem(item) {
+  return `<button class="nav-item ${state.view === item.id ? 'active' : ''}" data-view="${item.id}" type="button">
+    ${icon(item.icon, 19)}<span>${item.label}</span>${item.badge ? `<b>${item.badge}</b>` : ''}
+  </button>`;
+}
+
+function metricCard({ iconName, label, value, note, tone, trend = '' }) {
+  return `<article class="metric-card">
+    <div class="metric-top"><span class="metric-icon metric-${tone}">${icon(iconName, 19)}</span>${trend ? `<span class="metric-trend ${trend.startsWith('+') ? 'up' : ''}">${esc(trend)}</span>` : ''}</div>
+    <p>${label}</p><strong>${value}</strong><small>${note}</small>
+  </article>`;
+}
+
+function renderDashboard() {
+  const { tasks, activities, riverSegments } = state.data;
+  const summary = summarizeTasks(tasks);
+  const urgent = tasks.filter((task) => !['已完成', '已清理'].includes(task.status)).slice(0, 5);
+  return `
+    <section class="metric-grid" aria-label="今日业务概览">
+      ${metricCard({ iconName: 'scan-search', label: '今日上报', value: '18', note: '较昨日同期多 3 项', tone: 'teal', trend: '+20%' })}
+      ${metricCard({ iconName: 'triangle-alert', label: '高风险任务', value: summary.highRisk, note: '2 项需在 24 小时内处置', tone: 'red', trend: '+2' })}
+      ${metricCard({ iconName: 'clipboard-clock', label: '处置中', value: summary.active, note: '含 1 项已逾期', tone: 'amber' })}
+      ${metricCard({ iconName: 'circle-check-big', label: '本月闭环率', value: '92.6%', note: '目标 90%，保持达标', tone: 'blue', trend: '+4.1%' })}
+    </section>
+
+    <section class="dashboard-grid">
+      <div class="panel action-panel">
+        <div class="panel-heading">
+          <div><span class="eyebrow">优先队列</span><h2>需要你关注的事项</h2></div>
+          <button class="text-button" data-view="tasks">查看全部 ${icon('arrow-right', 16)}</button>
+        </div>
+        <div class="queue-list">
+          ${urgent.map((task) => `
+            <button class="queue-row" data-task-id="${task.id}" type="button">
+              <span class="risk-stripe risk-${statusTone(task.risk)}"></span>
+              <span class="queue-main"><strong>${esc(task.segmentName)}</strong><small>${esc(task.location)} · ${esc(task.category)}</small></span>
+              <span class="queue-badges">${badge(task.risk)}${badge(task.status)}</span>
+              <span class="queue-due ${task.due.includes('逾期') ? 'overdue' : ''}">${icon('clock-3', 14)}${esc(task.due)}</span>
+              ${icon('chevron-right', 17)}
+            </button>`).join('')}
+        </div>
+      </div>
+
+      <aside class="panel river-health">
+        <div class="panel-heading"><div><span class="eyebrow">河段态势</span><h2>巡查覆盖</h2></div><button class="icon-button" data-view="map" title="打开地图" aria-label="打开地图">${icon('map', 17)}</button></div>
+        <div class="health-summary">${progressRing(87, '本周覆盖')}<div><strong>13 / 15</strong><span>重点河段已巡查</span><small>较上周提前 1.5 天</small></div></div>
+        <div class="segment-bars">
+          ${riverSegments.slice(0, 4).map((segment, index) => `<div class="segment-bar"><div><span>${esc(segment.name)}</span><small>${[96, 88, 74, 62][index]}%</small></div><progress value="${[96, 88, 74, 62][index]}" max="100"></progress></div>`).join('')}
+        </div>
+      </aside>
+    </section>
+
+    <section class="dashboard-lower">
+      <div class="panel chart-panel">
+        <div class="panel-heading">
+          <div><span class="eyebrow">近 7 日</span><h2>上报与闭环趋势</h2></div>
+          <div class="legend"><span><i class="legend-report"></i>上报</span><span><i class="legend-done"></i>已闭环</span></div>
+        </div>
+        <div class="chart-wrap"><canvas id="trend-chart" aria-label="近七日上报与闭环趋势"></canvas></div>
+      </div>
+      <div class="panel activity-panel">
+        <div class="panel-heading"><div><span class="eyebrow">实时动态</span><h2>最新业务事件</h2></div><button class="icon-button" title="刷新" aria-label="刷新">${icon('refresh-cw', 16)}</button></div>
+        <ol class="activity-list">
+          ${activities.map((item) => `<li><time>${item.time}</time><span class="activity-dot ${item.tone}"></span><div><strong>${esc(item.title)}</strong><small>${esc(item.meta)}</small></div></li>`).join('')}
+        </ol>
+      </div>
+    </section>`;
+}
+
+function renderReport() {
+  return `<section class="report-layout">
+    <form class="panel report-form" id="report-form">
+      <div class="form-intro"><span class="step-number">01</span><div><h2>现场照片</h2><p>支持 JPEG、PNG、WebP，单张不超过 10 MB。</p></div></div>
+      <label class="upload-zone" id="upload-zone">
+        <input type="file" id="report-image" accept="image/jpeg,image/png,image/webp" multiple required />
+        <span class="upload-icon">${icon('image-up', 26)}</span>
+        <strong>拖放巡河照片到这里</strong><span>或点击选择一张现场照片</span>
+        <small>系统会校验真实格式、文件大小与像素数</small>
+      </label>
+      <div id="file-preview" class="file-preview hidden"></div>
+      <div class="form-divider"></div>
+      <div class="form-intro"><span class="step-number">02</span><div><h2>河段与时间</h2><p>EXIF 信息仅作初值，请确认现场记录。</p></div></div>
+      <div class="form-grid">
+        <label><span>所属河段 *</span><select name="riverSegmentId" required><option value="">请选择河段</option>${state.data.riverSegments.filter((item) => item.status === '启用').map((item) => `<option value="${item.id}">${esc(item.name)} · ${esc(item.area)}</option>`).join('')}</select></label>
+        <label><span>拍摄时间 *</span><input name="capturedAt" type="datetime-local" value="2026-09-02T16:36" required /></label>
+      </div>
+      <div class="form-divider"></div>
+      <div class="form-intro"><span class="step-number">03</span><div><h2>现场位置</h2><p>可使用照片坐标、当前定位或手动输入。</p></div></div>
+      <div class="location-fields">
+        <label><span>纬度</span><input name="latitude" inputmode="decimal" value="30.2741" placeholder="例如 30.2741" /></label>
+        <label><span>经度</span><input name="longitude" inputmode="decimal" value="120.1551" placeholder="例如 120.1551" /></label>
+        <button class="button button-secondary locate-button" type="button" data-action="locate">${icon('locate-fixed', 17)}当前定位</button>
+      </div>
+      <label class="full-field"><span>位置修改原因 <em>手动修改坐标时必填</em></span><input name="locationChangeReason" placeholder="例如：照片定位偏移，已按现场位置修正" /></label>
+      <div class="form-footer"><p>${icon('shield-check', 16)} 原图仅暂存于受控目录，识别成功后立即删除</p><button class="button button-primary" type="submit">${icon('send', 17)}创建识别任务</button></div>
+    </form>
+    <aside class="report-aside">
+      <div class="evidence-preview"><img src="/assets/river-waste-evidence.jpg" alt="河道漂浮垃圾现场示例"/><div><span>上报示例</span><strong>清晰包含水面与垃圾范围</strong></div></div>
+      <div class="panel flow-panel"><span class="eyebrow">处理流程</span><h2>提交后自动流转</h2><ol><li class="active"><i>1</i><div><strong>文件安全校验</strong><span>格式、解码与像素检查</span></div></li><li><i>2</i><div><strong>远程智能识别</strong><span>服务端持有 API Key</span></div></li><li><i>3</i><div><strong>模型业务研判</strong><span>仅接收结构化结果</span></div></li><li><i>4</i><div><strong>自动进入处置</strong><span>中高风险自动建单</span></div></li></ol></div>
+      <div class="privacy-note">${icon('lock-keyhole', 18)}<div><strong>密钥不会进入浏览器</strong><span>页面只访问平台 FastAPI，识别服务与 LLM Key 由服务器 Worker 注入。</span></div></div>
+    </aside>
+  </section>`;
+}
+
+function renderTasks() {
+  const filtered = filterTasks(state.data.tasks, state.filters);
+  return `<section class="panel task-workspace">
+    <div class="task-toolbar">
+      <div class="segmented" role="tablist"><button class="active">全部任务 <b>${state.data.tasks.length}</b></button><button>待复核 <b>1</b></button><button>处置单 <b>5</b></button></div>
+      <div class="task-tools"><button class="button button-secondary">${icon('download', 16)}导出 CSV</button><button class="button button-primary" data-view="report">${icon('plus', 16)}新建上报</button></div>
+    </div>
+    <div class="filter-bar">
+      <label class="filter-search">${icon('search', 16)}<input data-filter="keyword" value="${esc(state.filters.keyword)}" placeholder="搜索任务编号、河段、人员" /></label>
+      <select data-filter="risk"><option value="">全部风险</option>${['高', '中', '低'].map((value) => `<option ${state.filters.risk === value ? 'selected' : ''}>${value}</option>`).join('')}</select>
+      <select data-filter="status"><option value="">全部状态</option>${['待核查', '待派单', '已派单', '清理中', '待核验', '已逾期', '已完成', '已清理'].map((value) => `<option ${state.filters.status === value ? 'selected' : ''}>${value}</option>`).join('')}</select>
+      <select data-filter="category"><option value="">全部类别</option>${[...new Set(state.data.tasks.map((task) => task.category))].map((value) => `<option ${state.filters.category === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select>
+      <button class="icon-button" data-action="reset-filters" title="清除筛选" aria-label="清除筛选">${icon('list-restart', 17)}</button>
+    </div>
+    <div class="table-scroll"><table class="data-table"><thead><tr><th>任务</th><th>识别结果</th><th>风险</th><th>流程状态</th><th>负责人 / 上报人</th><th>时限</th><th></th></tr></thead><tbody>
+      ${filtered.map((task) => `<tr data-task-id="${task.id}" tabindex="0">
+        <td><strong>${esc(task.id)}</strong><span>${esc(task.segmentName)} · ${esc(task.location)}</span><small>${esc(task.capturedAt)}</small></td>
+        <td><strong>${esc(task.category)}</strong><span>${task.count} 个目标 · ${Math.round(task.confidence * 100)}% 置信度</span>${task.duplicate ? '<small class="duplicate-note">疑似重复点位</small>' : ''}</td>
+        <td>${badge(task.risk)}<span class="priority-text">${esc(task.priority)}</span></td>
+        <td>${badge(task.status)}<span>${esc(task.stage)}</span></td>
+        <td><strong>${esc(task.assignee || '未指派')}</strong><span>上报：${esc(task.reporter)}</span></td>
+        <td><span class="due-text ${task.due.includes('逾期') ? 'overdue' : ''}">${esc(task.due)}</span><small>${esc(task.updatedAt)}更新</small></td>
+        <td><button class="icon-button row-action" data-task-id="${task.id}" title="查看任务" aria-label="查看任务">${icon('chevron-right', 17)}</button></td>
+      </tr>`).join('')}
+    </tbody></table></div>
+    <div class="table-footer"><span>显示 ${filtered.length} / ${state.data.tasks.length} 项</span><div><button class="icon-button" disabled>${icon('chevron-left', 16)}</button><b>1</b><button class="icon-button" disabled>${icon('chevron-right', 16)}</button></div></div>
+  </section>`;
+}
+
+function renderMap() {
+  const visibleTasks = getMapTasks();
+  const riskCount = (risk) => visibleTasks.filter((task) => task.risk === risk).length;
+  return `<section class="map-workspace">
+    <div class="map-toolbar panel">
+      <div class="map-filter-group"><label>${icon('map-pin', 15)}<select data-map-filter="segment"><option value="">全部河段</option>${state.data.riverSegments.map((segment) => `<option value="${segment.id}" ${state.mapFilters.segment === segment.id ? 'selected' : ''}>${esc(segment.name)}</option>`).join('')}</select></label><label>${icon('triangle-alert', 15)}<select data-map-filter="risk"><option value="">全部风险</option><option value="高" ${state.mapFilters.risk === '高' ? 'selected' : ''}>高风险</option><option value="中" ${state.mapFilters.risk === '中' ? 'selected' : ''}>中风险</option><option value="低" ${state.mapFilters.risk === '低' ? 'selected' : ''}>低风险</option></select></label><label>${icon('clipboard-list', 15)}<select data-map-filter="status"><option value="">全部状态</option><option value="待处置" ${state.mapFilters.status === '待处置' ? 'selected' : ''}>待处置</option><option value="处置中" ${state.mapFilters.status === '处置中' ? 'selected' : ''}>处置中</option><option value="已闭环" ${state.mapFilters.status === '已闭环' ? 'selected' : ''}>已闭环</option></select></label></div>
+      <div class="map-stats"><span><i class="map-dot high"></i>高风险 ${riskCount('高')}</span><span><i class="map-dot medium"></i>中风险 ${riskCount('中')}</span><span><i class="map-dot low"></i>低风险 ${riskCount('低')}</span></div>
+    </div>
+    <div class="map-frame"><div id="river-map" aria-label="河道任务地图"></div><div class="map-floating-summary"><span class="eyebrow">当前视图</span><strong>${visibleTasks.length} 个现场点位</strong><small>${visibleTasks.filter((task) => task.duplicate).length} 个疑似重复点位</small></div></div>
+  </section>`;
+}
+
+function getMapTasks() {
+  return state.data.tasks.filter((task) => task.lat != null && task.lng != null)
+    .filter((task) => !state.mapFilters.segment || task.segmentId === state.mapFilters.segment)
+    .filter((task) => !state.mapFilters.risk || task.risk === state.mapFilters.risk)
+    .filter((task) => {
+      if (!state.mapFilters.status) return true;
+      if (state.mapFilters.status === '已闭环') return ['已完成', '已清理'].includes(task.status);
+      if (state.mapFilters.status === '处置中') return ['已派单', '清理中', '待核验'].includes(task.status);
+      return ['待核查', '待派单', '已逾期'].includes(task.status);
+    });
+}
+
+function renderStatistics() {
+  const total = state.data.tasks.length;
+  return `<section class="statistics-view">
+    <div class="stats-summary panel"><div><span class="eyebrow">本月业务摘要</span><h2>处置效率稳定提升</h2><p>共上报 126 项，116 项已完成分析，闭环率较上月提升 4.1%。</p></div><div class="stats-kpis"><div><strong>126</strong><span>上报总数</span></div><div><strong>92.6%</strong><span>处置闭环率</span></div><div><strong>18.4h</strong><span>平均处置时长</span></div><div><strong>${total - 1}</strong><span>有效识别类别</span></div></div></div>
+    <div class="stats-grid">
+      <div class="panel chart-panel large"><div class="panel-heading"><div><span class="eyebrow">业务趋势</span><h2>近 7 日上报与闭环</h2></div><button class="button button-secondary">${icon('calendar-days', 16)}近 7 日</button></div><div class="chart-wrap tall"><canvas id="stats-trend-chart"></canvas></div></div>
+      <div class="panel category-panel"><div class="panel-heading"><div><span class="eyebrow">垃圾构成</span><h2>统一类别占比</h2></div></div><div class="donut-wrap"><canvas id="category-chart"></canvas><div class="donut-center"><strong>126</strong><span>总识别</span></div></div><div class="category-legend">${state.data.categoryStats.map((item) => `<span><i style="background:${item.color}"></i>${esc(item.name)}<strong>${item.value}%</strong></span>`).join('')}</div></div>
+    </div>
+    <div class="panel performance-table"><div class="panel-heading"><div><span class="eyebrow">河段绩效</span><h2>本月处置情况</h2></div><button class="button button-secondary">${icon('download', 16)}导出数据</button></div><table class="data-table"><thead><tr><th>河段</th><th>上报量</th><th>高风险</th><th>平均响应</th><th>闭环率</th><th>趋势</th></tr></thead><tbody>${state.data.riverSegments.slice(0,4).map((item, index) => `<tr><td><strong>${item.name}</strong><span>${item.area}</span></td><td><strong>${item.tasks}</strong></td><td>${[4,2,3,1][index]}</td><td>${[12.4,16.2,21.5,18.8][index]} 小时</td><td><strong>${[96,91,88,93][index]}%</strong></td><td><span class="trend-up">↗ ${[8,3,5,2][index]}%</span></td></tr>`).join('')}</tbody></table></div>
+  </section>`;
+}
+
+function renderAdmin() {
+  return `<section class="admin-view">
+    <div class="admin-tabs"><button class="active">${icon('plug-zap', 17)}服务集成</button><button>${icon('users', 17)}账号管理</button><button>${icon('waves', 17)}河段档案</button><button>${icon('scroll-text', 17)}审计日志</button></div>
+    <div class="integration-banner"><span class="banner-icon">${icon('shield-check', 23)}</span><div><strong>服务密钥保持在后端</strong><p>此页面只显示连接状态和脱敏配置。识别 FastAPI 与 LLM API Key 由 Worker 从服务器环境读取，不会下发至浏览器。</p></div><span class="security-label">符合安全边界</span></div>
+    <div class="integration-grid">
+      ${state.data.integrations.map((item, index) => `<article class="integration-card">
+        <div class="integration-icon">${icon(['server', 'scan-line', 'bot', 'cpu'][index], 21)}</div>
+        <div class="integration-copy"><div><h2>${esc(item.name)}</h2>${badge(item.status)}</div><p>${esc(item.detail)}</p></div>
+        <dl><div><dt>最近响应</dt><dd>${esc(item.latency)}</dd></div><div><dt>认证位置</dt><dd>${index === 0 ? 'HttpOnly Cookie' : index === 3 ? '本机进程' : '服务器环境变量'}</dd></div><div><dt>最近检查</dt><dd>刚刚</dd></div></dl>
+        <div class="integration-actions"><button class="button button-secondary" data-action="test-integration" data-integration="${esc(item.name)}">${icon('activity', 16)}测试连接</button><button class="icon-button" title="集成详情" aria-label="集成详情">${icon('chevron-right', 17)}</button></div>
+      </article>`).join('')}
+    </div>
+    <div class="admin-lower">
+      <div class="panel config-panel"><div class="panel-heading"><div><span class="eyebrow">接入配置</span><h2>环境变量映射</h2></div><span class="config-scope">仅服务器</span></div><div class="code-table"><div><code>FASTAPI_BASE_URL</code><span>https://••••••••••••</span></div><div><code>FASTAPI_API_KEY</code><span>••••••••••••••••</span></div><div><code>LLM_BASE_URL</code><span>https://••••••/v1</span></div><div><code>LLM_API_KEY</code><span>••••••••••••••••</span></div><div><code>LLM_MODEL</code><span>gpt-5.5</span></div></div><p class="config-note">${icon('info', 15)} 修改服务端 <code>.env</code> 后重启 Web 与 Worker 生效。</p></div>
+      <div class="panel service-log"><div class="panel-heading"><div><span class="eyebrow">运行状态</span><h2>近 24 小时</h2></div></div><div class="service-metrics"><div><strong>99.8%</strong><span>接口可用率</span></div><div><strong>2.1 s</strong><span>平均分析耗时</span></div><div><strong>0</strong><span>最终失败</span></div></div><div class="log-line"><span>16:31:04</span><b>INFO</b><p>task RW-20260902-0241 entered manual_review</p></div><div class="log-line"><span>16:29:18</span><b>INFO</b><p>worker lease renewed · queue_depth=2</p></div></div>
+    </div>
+  </section>`;
+}
+
+function renderLoading() {
+  return `<div class="loading-screen"><span class="brand-mark">${icon('waves', 28)}</span><span class="loading-word">清川</span><strong>正在汇集河道态势</strong><div class="loading-line"></div></div>`;
+}
+
+function renderView() {
+  if (state.loading) return renderLoading();
+  const views = { dashboard: renderDashboard, report: renderReport, tasks: renderTasks, map: renderMap, statistics: renderStatistics, admin: renderAdmin };
+  return views[state.view]();
+}
+
+function render() {
+  mapRenderToken += 1;
+  chartInstances.splice(0).forEach((chart) => chart.destroy());
+  if (mapInstance) {
+    mapInstance.remove();
+    mapInstance = null;
+  }
+  if (amapMapInstance) {
+    destroyAmapMap(amapMapInstance);
+    amapMapInstance = null;
+  }
+  app.innerHTML = state.loading ? renderLoading() : shell(renderView());
+  createIcons({ icons });
+  bindEvents();
+  queueMicrotask(initVisuals);
+}
+
+function bindEvents() {
+  document.querySelectorAll('[data-view]').forEach((element) => element.addEventListener('click', () => {
+    const target = /** @type {HTMLElement} */ (element);
+    state.view = target.dataset.view;
+    state.navOpen = false;
+    history.replaceState(null, '', `#${state.view}`);
+    render();
+  }));
+
+  document.querySelector('[data-action="toggle-nav"]')?.addEventListener('click', () => { state.navOpen = !state.navOpen; render(); });
+  document.querySelector('[data-action="close-nav"]')?.addEventListener('click', () => { state.navOpen = false; render(); });
+  document.querySelector('[data-action="notifications"]')?.addEventListener('click', () => showToast('3 条新动态，已同步到实时事件列表。'));
+  document.querySelector('[data-action="reset-filters"]')?.addEventListener('click', () => { state.filters = { keyword: '', risk: '', status: '', category: '' }; render(); });
+
+  document.querySelectorAll('[data-task-id]').forEach((element) => element.addEventListener('click', (event) => {
+    const target = /** @type {HTMLElement} */ (event.currentTarget);
+    const clickedTask = event.target instanceof Element ? event.target.closest('[data-task-id]') : null;
+    if (clickedTask !== target) return;
+    openMapTask(target.dataset.taskId);
+  }));
+  document.querySelectorAll('[data-filter]').forEach((element) => element.addEventListener(element.tagName === 'INPUT' ? 'input' : 'change', () => {
+    const target = /** @type {HTMLInputElement|HTMLSelectElement} */ (element);
+    state.filters[target.dataset.filter] = target.value;
+    render();
+  }));
+  document.querySelectorAll('[data-map-filter]').forEach((element) => element.addEventListener('change', () => {
+    const target = /** @type {HTMLSelectElement} */ (element);
+    state.mapFilters[target.dataset.mapFilter] = target.value;
+    render();
+  }));
+
+  const globalSearch = /** @type {HTMLInputElement|null} */ (document.querySelector('[data-global-search]'));
+  globalSearch?.addEventListener('keydown', (event) => {
+    if (/** @type {KeyboardEvent} */ (event).key === 'Enter' && globalSearch.value.trim()) {
+      state.filters.keyword = globalSearch.value;
+      state.view = 'tasks';
+      render();
+    }
+  });
+
+  document.onkeydown = keyboardHandler;
+  bindReportForm();
+  document.querySelectorAll('[data-action="test-integration"]').forEach((button) => button.addEventListener('click', () => testIntegration(/** @type {HTMLButtonElement} */ (button))));
+}
+
+/** @param {KeyboardEvent} event */
+function keyboardHandler(event) {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    /** @type {HTMLInputElement|null} */ (document.querySelector('[data-global-search]'))?.focus();
+  }
+  if (event.key === 'Escape') closeOverlay();
+}
+
+function bindReportForm() {
+  const input = /** @type {HTMLInputElement|null} */ (document.querySelector('#report-image'));
+  const preview = /** @type {HTMLElement|null} */ (document.querySelector('#file-preview'));
+  input?.addEventListener('change', () => {
+    const files = [...(input.files || [])];
+    if (!files.length) return;
+    if (files.some((file) => file.size > 10 * 1024 * 1024)) {
+      showToast('图片不能超过 10 MB。', 'error');
+      input.value = '';
+      return;
+    }
+    preview.classList.remove('hidden');
+    const fileNames = files.map((file) => esc(file.name)).join('、');
+    preview.innerHTML = `<img src="${URL.createObjectURL(files[0])}" alt="待上传照片预览"/><div><strong>${fileNames}</strong><span>${files.length} 张照片 · 每张均已通过大小预检</span></div><button type="button" class="icon-button" data-remove-file title="移除照片">${icon('x', 16)}</button>`;
+    createIcons({ icons });
+    preview.querySelector('[data-remove-file]').addEventListener('click', () => { input.value = ''; preview.classList.add('hidden'); });
+  });
+  document.querySelector('[data-action="locate"]')?.addEventListener('click', () => showToast('已使用演示坐标。真实接入时浏览器将请求定位权限。'));
+  document.querySelector('#report-form')?.addEventListener('submit', submitReport);
+}
+
+/** @param {SubmitEvent} event */
+async function submitReport(event) {
+  event.preventDefault();
+  const form = /** @type {HTMLFormElement} */ (event.currentTarget);
+  const submit = /** @type {HTMLButtonElement} */ (form.querySelector('[type="submit"]'));
+  const images = [...(/** @type {HTMLInputElement} */ (form.querySelector('#report-image')).files || [])];
+  if (!images.length) return showToast('请先选择一张现场照片。', 'error');
+  const formData = new FormData(form);
+  const latitude = Number(formData.get('latitude')) || null;
+  const longitude = Number(formData.get('longitude')) || null;
+  const reason = String(formData.get('locationChangeReason') || '').trim();
+  if ((latitude !== 30.2741 || longitude !== 120.1551) && !reason) {
+    return showToast('手动修改坐标时，请填写位置修改原因。', 'error');
+  }
+  submit.disabled = true;
+  submit.innerHTML = `${icon('loader-circle', 17)}正在创建`;
+  createIcons({ icons });
+  try {
+    const results = [];
+    const modelFailures = [];
+    for (const image of images) {
+      const result = await api.createTask({ image, riverSegmentId: formData.get('riverSegmentId'), capturedAt: formData.get('capturedAt'), latitude, longitude, locationChangeReason: reason });
+      if (llm && result?.objects) {
+        try {
+          Object.assign(result, await llm.analyzeRecognition(result), { modelStatus: 'completed' });
+        } catch (error) {
+          Object.assign(result, { modelStatus: 'failed', modelError: error.message || '大模型研判失败' });
+          modelFailures.push(result.id);
+        }
+      }
+      results.push(result);
+    }
+    const createdTasks = results.map((result, index) => taskRecordFromResult(result, {
+      image: images[index],
+      riverSegmentId: formData.get('riverSegmentId'),
+      capturedAt: formData.get('capturedAt'),
+      latitude,
+      longitude,
+    }));
+    state.data.tasks.unshift(...createdTasks);
+    showToast(`${results.length} 个识别任务已进入队列。`, 'success');
+    if (modelFailures.length) showToast(`${modelFailures.length} 个任务已完成识别，但大模型研判暂时失败。`, 'error');
+    setTimeout(() => { state.view = 'tasks'; render(); }, 700);
+  } catch (error) {
+    showToast(error.message || '创建任务失败。', 'error');
+    submit.disabled = false;
+  }
+}
+
+function taskRecordFromResult(result, payload) {
+  const segment = state.data.riverSegments.find((item) => item.id === payload.riverSegmentId);
+  const fallbackId = `TASK-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+  const task = {
+    id: fallbackId,
+    segmentId: payload.riverSegmentId,
+    segmentName: segment?.name || '待补充河段',
+    location: '新建上报',
+    category: '待识别',
+    sourceCategory: 'unknown',
+    confidence: 0,
+    risk: '中',
+    priority: '高',
+    status: '待核查',
+    stage: '人工复核',
+    reporter: state.data.currentUser?.name || '当前用户',
+    capturedAt: payload.capturedAt || new Date().toLocaleString('zh-CN', { hour12: false }),
+    updatedAt: '刚刚',
+    lat: payload.latitude,
+    lng: payload.longitude,
+    count: 0,
+    coverage: '0%',
+    duplicate: false,
+    due: '待核查后确定',
+    summary: '任务已创建，等待识别服务返回结果。',
+    recommendation: '请结合现场情况完成业务复核。',
+  };
+  Object.assign(task, result || {}, {
+    id: result?.id || fallbackId,
+    segmentId: result?.segmentId ?? payload.riverSegmentId,
+    segmentName: result?.segmentName || segment?.name || '待补充河段',
+    category: result?.modelCategory || result?.category || '待识别',
+    risk: result?.modelRisk || result?.risk || '中',
+    priority: result?.modelPriority || result?.priority || '高',
+    summary: result?.modelSummary || result?.summary || '任务已创建，等待识别服务返回结果。',
+    recommendation: result?.modelRecommendation || result?.recommendation || '请结合现场情况完成业务复核。',
+    capturedAt: result?.capturedAt || payload.capturedAt,
+    lat: result?.lat ?? payload.latitude,
+    lng: result?.lng ?? payload.longitude,
+    image: result?.image || (typeof URL?.createObjectURL === 'function' ? URL.createObjectURL(payload.image) : ''),
+  });
+  return task;
+}
+
+function openTask(taskId) {
+  const task = state.data.tasks.find((item) => item.id === taskId);
+  if (!task) return;
+  selectedTaskId = taskId;
+  const root = /** @type {HTMLElement} */ (document.querySelector('#overlay-root'));
+  root.innerHTML = `<div class="overlay active"><button class="overlay-backdrop" data-close-overlay aria-label="关闭详情"></button><aside class="detail-drawer">
+    <header><div><span class="eyebrow">任务详情</span><h2>${esc(task.id)}</h2></div><button class="icon-button" data-close-overlay aria-label="关闭详情">${icon('x', 19)}</button></header>
+    <div class="detail-photo"><img src="${task.image}" alt="${esc(task.segmentName)}现场照片"/><div><span>${badge(task.risk)}</span><small>${esc(task.capturedAt)}</small></div></div>
+    <div class="detail-body">
+      <section class="detail-summary"><div><span class="eyebrow">智能研判</span><h3>${esc(task.category)}</h3></div><strong>${Math.round(task.confidence * 100)}<small>% 置信度</small></strong></section>
+      <div class="detail-facts"><div><span>河段点位</span><strong>${esc(task.segmentName)}</strong><small>${esc(task.location)}</small></div><div><span>目标与覆盖</span><strong>${task.count} 个目标</strong><small>覆盖约 ${task.coverage}</small></div><div><span>处置状态</span><strong>${esc(task.status)}</strong><small>${esc(task.due)}</small></div><div><span>责任人员</span><strong>${esc(task.assignee || '尚未指派')}</strong><small>上报：${esc(task.reporter)}</small></div></div>
+      ${(task.inferenceTimeMs != null || task.imageSize || task.objects?.length) ? `<section class="recognition-meta"><span class="eyebrow">FastAPI 原始识别</span><div><span>目标 ${task.count} 个</span>${task.inferenceTimeMs != null ? `<span>推理 ${task.inferenceTimeMs} ms</span>` : ''}${task.imageSize ? `<span>图像 ${task.imageSize.width} × ${task.imageSize.height}</span>` : ''}${task.samScore != null ? `<span>SAM ${task.samScore.toFixed(2)}</span>` : ''}</div></section>` : ''}
+      ${task.duplicate ? `<div class="duplicate-alert">${icon('copy-check', 18)}<div><strong>疑似重复点位</strong><span>同河段 50 米内、24 小时内存在相同类别任务，仅作提示，不会自动合并。</span></div></div>` : ''}
+      <section class="analysis-block"><h3>模型摘要${task.modelStatus === 'completed' ? ' · 大模型研判' : ''}</h3><p>${esc(task.summary)}</p>${task.modelError ? `<p class="model-error">${esc(task.modelError)}</p>` : ''}<h3>处置建议</h3><p>${esc(task.recommendation)}</p></section>
+      <section class="process-track"><h3>流程进度</h3><div><span class="done"><i>${icon('check', 13)}</i><b>照片上报</b></span><span class="done"><i>${icon('check', 13)}</i><b>智能识别</b></span><span class="${task.status === '待核查' ? 'current' : 'done'}"><i>${task.status === '待核查' ? '3' : icon('check', 13)}</i><b>业务研判</b></span><span class="${['已派单','清理中','待核验','已清理'].includes(task.status) ? 'current' : ''}"><i>4</i><b>处置闭环</b></span></div></section>
+    </div>
+    <footer><button class="button button-secondary" data-close-overlay>关闭</button><button class="button button-secondary" data-action="map-task">${icon('map', 17)}地图定位</button>${task.status === '待核查' ? `<button class="button button-primary" data-action="review-task">${icon('file-check-2', 17)}人工复核</button>` : task.status === '待派单' ? `<button class="button button-primary" data-action="assign-task">${icon('user-round-plus', 17)}立即派单</button>` : `<button class="button button-primary">${icon('external-link', 17)}查看处置单</button>`}</footer>
+  </aside></div>`;
+  createIcons({ icons });
+  root.querySelectorAll('[data-close-overlay]').forEach((element) => element.addEventListener('click', closeOverlay));
+  root.querySelector('[data-action="review-task"]')?.addEventListener('click', () => openReview(task));
+  root.querySelector('[data-action="assign-task"]')?.addEventListener('click', () => openAssign(task));
+  root.querySelector('[data-action="map-task"]')?.addEventListener('click', () => {
+    closeOverlay();
+    openMapTask(task.id);
+  });
+}
+
+function openMapTask(taskId) {
+  const task = state.data.tasks.find((item) => item.id === taskId);
+  if (!task) return;
+  state.mapFocusTaskId = taskId;
+  state.mapFilters = { segment: '', risk: '', status: '' };
+  state.view = 'map';
+  state.navOpen = false;
+  history.replaceState(null, '', '#map');
+  render();
+}
+
+function openReview(task) {
+  const root = /** @type {HTMLElement} */ (document.querySelector('#overlay-root'));
+  root.querySelector('.detail-drawer').innerHTML = `<header><div><span class="eyebrow">人工复核</span><h2>${esc(task.id)}</h2></div><button class="icon-button" data-close-overlay>${icon('x', 19)}</button></header><form class="drawer-form" id="review-form"><div class="review-callout">${icon('triangle-alert', 19)}<div><strong>低置信度结果不可由模型补猜</strong><span>请依据现场信息确认最终业务结论，原始识别结果将完整保留。</span></div></div><label><span>复核结论</span><select name="decision"><option>确认有效</option><option>误报</option><option>需重新拍摄</option></select></label><div class="form-grid"><label><span>统一类别</span><select name="category"><option>${esc(task.category)}</option><option>塑料制品</option><option>生活垃圾</option><option>其他/无法判断</option></select></label><label><span>风险等级</span><select name="risk"><option>高</option><option>中</option><option>低</option></select></label><label><span>处置优先级</span><select name="priority"><option>紧急</option><option>高</option><option>普通</option></select></label></div><label><span>复核理由 *</span><textarea name="reason" rows="5" placeholder="说明确认依据或修正原因" required></textarea></label><footer><button class="button button-secondary" data-close-overlay type="button">取消</button><button class="button button-primary" type="submit">${icon('check', 17)}保存复核结论</button></footer></form>`;
+  createIcons({ icons });
+  root.querySelectorAll('[data-close-overlay]').forEach((element) => element.addEventListener('click', closeOverlay));
+  root.querySelector('#review-form').addEventListener('submit', async (event) => { event.preventDefault(); const data = new FormData(/** @type {HTMLFormElement} */ (event.currentTarget)); const payload = Object.fromEntries(data); const result = await api.reviewTask(task.id, payload); Object.assign(task, payload, { status: result.status || '待派单', stage: '分析完成' }); closeOverlay(); showToast('复核结论已保存，任务已进入待派单。', 'success'); });
+}
+
+function openAssign(task) {
+  const root = /** @type {HTMLElement} */ (document.querySelector('#overlay-root'));
+  root.querySelector('.detail-drawer').innerHTML = `<header><div><span class="eyebrow">任务派单</span><h2>${esc(task.segmentName)}</h2></div><button class="icon-button" data-close-overlay>${icon('x', 19)}</button></header><form class="drawer-form" id="assign-form"><div class="assignment-summary"><div>${badge(task.risk)}${badge(task.priority)}</div><strong>${esc(task.category)}</strong><span>${esc(task.location)}</span></div><label><span>清理负责人 *</span><select name="assigneeId" required><option value="">请选择已启用巡河员</option>${state.data.users.filter((user) => user.role === '巡河员' && user.status === '启用').map((user) => `<option value="${user.id}">${esc(user.name)} · 当前 ${user.workload} 单</option>`).join('')}</select></label><label><span>完成期限 *</span><input type="datetime-local" name="dueAt" value="2026-09-03T16:00" required /></label><label><span>任务说明</span><textarea name="note" rows="4" placeholder="补充现场安全要求或处置范围"></textarea></label><footer><button class="button button-secondary" data-close-overlay type="button">取消</button><button class="button button-primary" type="submit">${icon('send', 17)}确认派单</button></footer></form>`;
+  createIcons({ icons });
+  root.querySelectorAll('[data-close-overlay]').forEach((element) => element.addEventListener('click', closeOverlay));
+  root.querySelector('#assign-form').addEventListener('submit', async (event) => { event.preventDefault(); const data = new FormData(/** @type {HTMLFormElement} */ (event.currentTarget)); const payload = Object.fromEntries(data); await api.assignOrder(task.id, payload); const assignee = state.data.users.find((user) => user.id === payload.assigneeId); Object.assign(task, { status: '已派单', stage: '等待处置', assignee: assignee?.name || '已指派' }); closeOverlay(); showToast('处置单已派发，负责人可在“我的处置单”中查看。', 'success'); });
+}
+
+function closeOverlay() {
+  selectedTaskId = null;
+  const root = document.querySelector('#overlay-root');
+  if (root) root.innerHTML = '';
+}
+
+/** @param {HTMLButtonElement} button */
+async function testIntegration(button) {
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = `${icon('loader-circle', 16)}检查中`;
+  createIcons({ icons });
+  try {
+    const result = await api.testIntegration();
+    showToast(`${button.dataset.integration} 连接正常，响应 ${result.latency} ms。`, 'success');
+  } catch (error) {
+    showToast(error.message || '连接检查失败。', 'error');
+  } finally {
+    button.disabled = false;
+    button.innerHTML = original;
+    createIcons({ icons });
+  }
+}
+
+function showToast(message, type = 'info') {
+  const region = document.querySelector('.toast-region') || document.body;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `${icon(type === 'error' ? 'circle-alert' : type === 'success' ? 'circle-check' : 'info', 18)}<span>${esc(message)}</span>`;
+  region.append(toast);
+  createIcons({ icons });
+  setTimeout(() => toast.classList.add('visible'), 10);
+  setTimeout(() => { toast.classList.remove('visible'); setTimeout(() => toast.remove(), 220); }, 3200);
+}
+
+function initVisuals() {
+  if (state.view === 'dashboard') initTrendChart('trend-chart', false);
+  if (state.view === 'statistics') {
+    initTrendChart('stats-trend-chart', true);
+    initCategoryChart();
+  }
+  if (state.view === 'map') initMap();
+}
+
+function initTrendChart(id, filled) {
+  const canvas = /** @type {HTMLCanvasElement|null} */ (document.querySelector(`#${id}`));
+  if (!canvas) return;
+  const chart = new Chart(canvas, {
+    type: 'line',
+    data: { labels: state.data.weeklyTrend.labels, datasets: [
+      { label: '上报', data: state.data.weeklyTrend.reports, borderColor: '#2dd4a7', backgroundColor: 'rgba(45,212,167,.14)', fill: filled, tension: .38, pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: '#2dd4a7', borderWidth: 2 },
+      { label: '已闭环', data: state.data.weeklyTrend.disposed, borderColor: '#f0a03c', backgroundColor: 'transparent', fill: false, tension: .38, pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: '#f0a03c', borderWidth: 2 },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#0b1613', padding: 12, cornerRadius: 10, boxPadding: 4, titleColor: '#e8f1ec', bodyColor: 'rgba(232,241,236,.65)', borderColor: 'rgba(255,255,255,.1)', borderWidth: 1, displayColors: true } }, scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: 'rgba(232,241,236,.42)', font: { size: 11 } } }, y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,.06)' }, border: { display: false }, ticks: { color: 'rgba(232,241,236,.42)', stepSize: 5, font: { size: 11 } } } } },
+  });
+  chartInstances.push(chart);
+}
+
+function initCategoryChart() {
+  const canvas = /** @type {HTMLCanvasElement|null} */ (document.querySelector('#category-chart'));
+  if (!canvas) return;
+  const chart = new Chart(canvas, { type: 'doughnut', data: { labels: state.data.categoryStats.map((item) => item.name), datasets: [{ data: state.data.categoryStats.map((item) => item.value), backgroundColor: state.data.categoryStats.map((item) => item.color), borderWidth: 0, hoverOffset: 4 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '72%', plugins: { legend: { display: false } } } });
+  chartInstances.push(chart);
+}
+
+async function initMap() {
+  const container = document.querySelector('#river-map');
+  if (!container) return;
+  const renderToken = mapRenderToken;
+  if (mapProvider === 'amap' && amapKey) {
+    try {
+      const nextAmapMap = await createAmapMap({
+        container,
+        key: amapKey,
+        securityCode: amapSecurityCode,
+        tasks: getMapTasks(),
+        focusTaskId: state.mapFocusTaskId,
+        onTaskClick: openTask,
+      });
+      if (renderToken !== mapRenderToken || !container.isConnected) {
+        destroyAmapMap(nextAmapMap);
+        return;
+      }
+      amapMapInstance = nextAmapMap;
+      state.mapFocusTaskId = null;
+      return;
+    } catch (error) {
+      if (renderToken !== mapRenderToken || !container.isConnected) return;
+      showToast(`${error.message}，已切换为备用地图`, 'error');
+    }
+  }
+  mapInstance = L.map(container, { zoomControl: false }).setView([30.272, 120.169], 12);
+  L.control.zoom({ position: 'bottomright' }).addTo(mapInstance);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(mapInstance);
+  mapInstance.on('popupopen', () => document.querySelector('[data-popup-task]')?.addEventListener('click', (event) => openTask(/** @type {HTMLElement} */ (event.currentTarget).dataset.popupTask)));
+  getMapTasks().forEach((task) => {
+    const tone = task.risk === '高' ? '#f0655e' : task.risk === '中' ? '#f0a03c' : '#2dd4a7';
+    const marker = L.circleMarker([task.lat, task.lng], { radius: task.risk === '高' ? 10 : 8, color: '#fff', weight: 3, fillColor: tone, fillOpacity: 1 });
+    marker.bindPopup(`<div class="map-popup"><span>${esc(task.segmentName)}</span><strong>${esc(task.category)}</strong><small>${esc(task.status)} · ${esc(task.due)}</small><button data-popup-task="${task.id}">查看任务</button></div>`).addTo(mapInstance);
+    if (task.id === state.mapFocusTaskId) {
+      mapInstance.setView([task.lat, task.lng], 16);
+      marker.openPopup();
+    }
+  });
+  state.mapFocusTaskId = null;
+  setTimeout(() => mapInstance?.invalidateSize(), 100);
+}
+
+async function bootstrap() {
+  try {
+    state.data = await api.getBootstrap();
+    state.loading = false;
+    const requestedView = location.hash.slice(1);
+    if (navItems.some((item) => item.id === requestedView)) state.view = requestedView;
+    render();
+    maybeShowCover();
+  } catch (error) {
+    app.innerHTML = `<div class="fatal-state">${icon('cloud-off', 30)}<h1>平台服务暂时不可用</h1><p>${esc(error.message || '无法加载工作台数据')}</p><button class="button button-primary" onclick="location.reload()">重新连接</button></div>`;
+    createIcons({ icons });
+  }
+}
+
+/* ---------- 封面（Lithos 式光标聚光灯揭示，每个标签页会话展示一次） ---------- */
+const COVER_KEY = 'qingchuan.cover.v1';
+
+function maybeShowCover() {
+  try {
+    if (sessionStorage.getItem(COVER_KEY)) return;
+  } catch (error) { /* 隐私模式下 sessionStorage 不可用时仍展示封面 */ }
+  showCover();
+}
+
+function showCover() {
+  const cover = document.createElement('div');
+  cover.id = 'cover-root';
+  cover.innerHTML = `
+    <img class="cover-layer cover-base" src="/assets/cover-base.jpg" alt="暮色中的城市河道航拍" />
+    <div class="cover-reveal-wrap"><img class="cover-layer cover-reveal" src="/assets/cover-reveal.jpg" alt="清澈见底的河水" /></div>
+    <div class="cover-vignette"></div>
+    <nav class="cover-nav">
+      <div class="cover-brand"><span class="brand-mark">${icon('waves', 22)}</span><span class="cover-word">清川</span></div>
+      <span class="cover-nav-tag">River Intelligence Console</span>
+    </nav>
+    <div class="cover-heading">
+      <h1><span class="cover-line1">一川清流</span><span class="cover-line2">皆被温柔守护</span></h1>
+      <p class="cover-hint">${icon('scan-search', 14)} 移动光标，看见河流本该的样子</p>
+    </div>
+    <div class="cover-bottom">
+      <p>清川 · 河道垃圾智能处置平台。以图像识别与业务大模型串联上报、研判、派单、清理与核验，让每一次发现都抵达处置现场。</p>
+      <div class="cover-cta">
+        <p>15 段重点河道、24 小时智能研判、闭环可溯的处置节奏。</p>
+        <button class="cover-enter" data-cover-enter type="button">进入工作台 ${icon('arrow-right', 16)}</button>
+      </div>
+    </div>`;
+  document.body.append(cover);
+  createIcons({ icons });
+  const stopCover = initCover(cover);
+  cover.querySelector('[data-cover-enter]')?.addEventListener('click', () => {
+    try { sessionStorage.setItem(COVER_KEY, '1'); } catch (error) { /* 忽略存储异常 */ }
+    cover.classList.add('leaving');
+    setTimeout(() => { stopCover(); cover.remove(); }, 640);
+  });
+}
+
+render();
+bootstrap();

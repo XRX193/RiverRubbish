@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build and test output
+dist/
+playwright-report/
+test-results/
+coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and local tooling
+*.log
+.idea/
+.workbuddy/
+
+# Local-only files and generated screenshots
+/main.py
+/artifacts-*.png
+.DS_Store
+Thumbs.db
