@@ -172,7 +172,7 @@ function shell(content) {
 
 function navItem(item) {
   return `<button class="nav-item ${state.view === item.id ? 'active' : ''}" data-view="${item.id}" type="button">
-    ${icon(item.icon, 19)}<span>${item.label}</span>${item.badge ? `<b>${item.badge}</b>` : ''}
+    <span>${item.label}</span>${item.badge ? `<b>${item.badge}</b>` : ''}
   </button>`;
 }
 
@@ -753,14 +753,13 @@ function showCover() {
     </nav>
     <div class="cover-heading">
       <h1><span class="cover-line1">一川清流</span><span class="cover-line2">皆被温柔守护</span></h1>
-      <p class="cover-hint">${icon('scan-search', 14)} 移动光标，看见河流本该的样子</p>
+      <div class="cover-actions">
+        <button class="cover-enter" data-cover-enter type="button">进入工作台 ${icon('arrow-right', 19)}</button>
+      </div>
     </div>
     <div class="cover-bottom">
       <p>清川 · 河道垃圾智能处置平台。以图像识别与业务大模型串联上报、研判、派单、清理与核验，让每一次发现都抵达处置现场。</p>
-      <div class="cover-cta">
-        <p>15 段重点河道、24 小时智能研判、闭环可溯的处置节奏。</p>
-        <button class="cover-enter" data-cover-enter type="button">进入工作台 ${icon('arrow-right', 16)}</button>
-      </div>
+      <p class="cover-note">15 段重点河道、24 小时智能研判、闭环可溯的处置节奏。</p>
     </div>`;
   document.body.append(cover);
   createIcons({ icons });
