@@ -5,7 +5,7 @@ import { Chart, registerables } from 'chart.js';
 import L from 'leaflet';
 import { createAmapMap, destroyAmapMap } from './map/amap-map.js';
 import {
-  Activity, ArrowRight, Bell, Bot, CalendarDays, ChartNoAxesColumnIncreasing,
+  Activity, ArrowRight, Bell, Bot, CalendarDays, Camera, ChartNoAxesColumnIncreasing,
   Check, ChevronLeft, ChevronRight, ChevronsUpDown, CircleAlert, CircleCheck,
   CircleCheckBig, ClipboardClock, ClipboardList, Clock3, CloudOff, CopyCheck, Cpu,
   Download, ExternalLink, FileCheck2, ImageUp, Info, LayoutDashboard,
@@ -23,7 +23,7 @@ import { filterTasks, summarizeTasks } from './domain/task-query.js';
 Chart.register(...registerables);
 
 const icons = {
-  Activity, ArrowRight, Bell, Bot, CalendarDays, ChartNoAxesColumnIncreasing,
+  Activity, ArrowRight, Bell, Bot, CalendarDays, Camera, ChartNoAxesColumnIncreasing,
   Check, ChevronLeft, ChevronRight, ChevronsUpDown, CircleAlert, CircleCheck,
   CircleCheckBig, ClipboardClock, ClipboardList, Clock3, CloudOff, CopyCheck, Cpu,
   Download, ExternalLink, FileCheck2, ImageUp, Info, LayoutDashboard,
@@ -65,6 +65,7 @@ let mapRenderToken = 0;
 let selectedTaskId = null;
 
 const state = {
+  role: null, // 'admin' | 'patrol' | null（未选择 → 身份门户）
   view: 'dashboard',
   loading: true,
   navOpen: false,
@@ -91,6 +92,18 @@ const viewMeta = {
   statistics: ['数据统计', '观察上报趋势、垃圾构成与处置履约情况。'],
   admin: ['系统管理', '维护河段、账号与仅服务端可见的模型集成状态。'],
 };
+
+/* 按角色过滤导航：管理员完整工作台；巡河员仅上报与我的上报 */
+const roleNav = {
+  admin: navItems,
+  patrol: [
+    { id: 'report', label: '现场上报', icon: 'upload-cloud' },
+    { id: 'myTasks', label: '我的上报', icon: 'clipboard-list' },
+  ],
+};
+viewMeta.myTasks = ['我的上报', '查看我上报的识别任务与处理进度。'];
+const viewForRole = { admin: 'dashboard', patrol: 'report' };
+const isMobile = /Android|iPhone|iPad|iPod|Mobile|Opera Mini|IEMobile|Windows Phone/i.test(navigator.userAgent);
 
 function esc(value = '') {
   return String(value)
@@ -126,45 +139,42 @@ function progressRing(value, label, color = '#2dd4a7') {
 function shell(content) {
   const [title, subtitle] = viewMeta[state.view];
   const user = state.data?.currentUser;
+  const isAdmin = state.role === 'admin';
+  const nav = (roleNav[state.role] || navItems).map((item) => `
+    <button class="nav-pill ${state.view === item.id ? 'active' : ''}" data-view="${item.id}" type="button" title="${item.label}">
+      ${icon(item.icon, 15)}<span>${item.label}</span>${item.badge ? `<b>${item.badge}</b>` : ''}
+    </button>`).join('');
   return `
-    <div class="app-shell ${state.navOpen ? 'nav-is-open' : ''}">
-      <aside class="sidebar" aria-label="主导航">
+    <div class="app-shell">
+      <header class="top-nav">
         <div class="brand">
-          <span class="brand-mark">${icon('waves', 24)}</span>
-          <span><strong>清川</strong><small>河道智治平台</small></span>
+          <span class="brand-mark">${icon('waves', 21)}</span>
+          <span class="brand-text"><strong>清川</strong><small>河道智治平台</small></span>
         </div>
-        <nav class="nav-list">
-          <p class="nav-section">工作台</p>
-          ${navItems.slice(0, 4).map(navItem).join('')}
-          <p class="nav-section">洞察与管理</p>
-          ${navItems.slice(4).map(navItem).join('')}
-        </nav>
-        <div class="side-service">
-          <div class="service-heading"><span class="pulse-dot"></span>系统服务正常</div>
-          <div class="service-row"><span>任务 Worker</span><strong>运行中</strong></div>
-          <div class="service-row"><span>队列</span><strong>2 项</strong></div>
+        <nav class="top-nav-list" aria-label="主导航">${nav}</nav>
+        <div class="top-nav-right">
+          ${isAdmin ? `
+            <div class="global-search">${icon('search', 16)}<input type="search" data-global-search placeholder="搜索任务、河段或人员" aria-label="全局搜索"/></div>
+            <button class="icon-button" data-action="notifications" title="通知" aria-label="通知">${icon('bell')}<span></span></button>
+            ${state.view !== 'report' ? `<button class="button button-primary desktop-create" data-view="report">${icon('plus', 16)}新建上报</button>` : ''}`
+          : `<span class="role-chip patrol"><i class="pulse-dot"></i>巡河员视图</span>`}
+          <label class="role-switch" title="切换身份视图">
+            <span>${icon('chevrons-up-down', 13)}身份</span>
+            <select data-role-switch aria-label="切换身份">
+              <option value="admin" ${state.role === 'admin' ? 'selected' : ''}>管理员</option>
+              <option value="patrol" ${state.role === 'patrol' ? 'selected' : ''}>巡河员</option>
+            </select>
+          </label>
+          <div class="mini-user">
+            <span class="avatar">${esc(user?.initials || (isAdmin ? '调' : '巡'))}</span>
+            <span><strong>${esc(user?.name || (isAdmin ? '调度员' : '巡河员'))}</strong><small>${esc(user?.role || (isAdmin ? '平台管理员' : '现场巡河员'))}</small></span>
+          </div>
         </div>
-        <button class="profile-block" data-action="profile" type="button">
-          <span class="avatar">${esc(user?.initials || '调')}</span>
-          <span><strong>${esc(user?.name || '调度员')}</strong><small>${esc(user?.role || '')}</small></span>
-          ${icon('chevrons-up-down', 16)}
-        </button>
-      </aside>
-      <button class="sidebar-scrim" data-action="close-nav" aria-label="关闭导航"></button>
-      <div class="workspace">
-        <header class="topbar">
-          <div class="page-heading">
-            <button class="icon-button mobile-menu" data-action="toggle-nav" title="打开导航" aria-label="打开导航">${icon('menu')}</button>
-            <div><h1>${title}</h1><p>${subtitle}</p></div>
-          </div>
-          <div class="top-actions">
-            <div class="global-search">${icon('search', 17)}<input type="search" data-global-search placeholder="搜索任务、河段或人员" aria-label="全局搜索"/><kbd>⌘ K</kbd></div>
-            <button class="icon-button notification-button" data-action="notifications" title="通知" aria-label="通知">${icon('bell')}<span></span></button>
-            <button class="button button-primary desktop-create" data-view="report">${icon('plus', 17)}新建上报</button>
-          </div>
-        </header>
-        <main class="main-content">${content}</main>
-      </div>
+      </header>
+      <main class="main-content">
+        <div class="content-heading"><div><h1>${title}</h1><p>${subtitle}</p></div></div>
+        ${content}
+      </main>
     </div>
     <div id="overlay-root"></div>
     <div class="toast-region" aria-live="polite"></div>`;
@@ -244,9 +254,9 @@ function renderReport() {
     <form class="panel report-form" id="report-form">
       <div class="form-intro"><span class="step-number">01</span><div><h2>现场照片</h2><p>支持 JPEG、PNG、WebP，单张不超过 10 MB。</p></div></div>
       <label class="upload-zone" id="upload-zone">
-        <input type="file" id="report-image" accept="image/jpeg,image/png,image/webp" multiple required />
-        <span class="upload-icon">${icon('image-up', 26)}</span>
-        <strong>拖放巡河照片到这里</strong><span>或点击选择一张现场照片</span>
+        <input type="file" id="report-image" accept="image/*" ${isMobile ? 'capture="environment" ' : ''}multiple required />
+        <span class="upload-icon">${icon('camera', 26)}</span>
+        <strong>拖放巡河照片到这里</strong><span>或点击现场拍照 / 选择照片</span>
         <small>系统会校验真实格式、文件大小与像素数</small>
       </label>
       <div id="file-preview" class="file-preview hidden"></div>
@@ -362,10 +372,75 @@ function renderLoading() {
   return `<div class="loading-screen"><span class="brand-mark">${icon('waves', 28)}</span><span class="loading-word">清川</span><strong>正在汇集河道态势</strong><div class="loading-line"></div></div>`;
 }
 
+function renderPortal() {
+  const adminPoints = ['调度总览', '任务复核与派单', '河道地图', '数据统计', '系统管理'];
+  const patrolPoints = ['现场拍照上传', 'AI 智能识别', '上报进度跟踪'];
+  return `
+    <div class="portal-page">
+      <div class="portal-water" aria-hidden="true"></div>
+      <div class="portal-hero">
+        <span class="brand-mark">${icon('waves', 26)}</span>
+        <p class="portal-kicker">Qingchuan · River Intelligence Console</p>
+        <h1>河道垃圾智能处置平台</h1>
+        <p class="portal-lead">以图像识别与业务大模型串联上报、研判、派单、清理与核验闭环，让每一次发现都抵达处置现场。</p>
+      </div>
+      <div class="portal-cards">
+        <button class="portal-card" data-role-select="admin" type="button">
+          <span class="portal-icon admin">${icon('shield-check', 25)}</span>
+          <span class="portal-copy">
+            <span class="portal-title"><strong>我是管理员</strong><em>完整工作台</em></span>
+            <span class="portal-desc">统筹调度、复核派单、查看河道地图与平台统计</span>
+            <span class="portal-tags">${adminPoints.map((p) => `<i>${p}</i>`).join('')}</span>
+          </span>
+          <span class="portal-arrow">${icon('arrow-right', 20)}</span>
+        </button>
+        <button class="portal-card featured" data-role-select="patrol" type="button">
+          <span class="portal-icon patrol">${icon('camera', 25)}</span>
+          <span class="portal-copy">
+            <span class="portal-title"><strong>我是巡河员</strong><em>手机推荐 · 即拍即报</em></span>
+            <span class="portal-desc">现场拍照或选图，立即识别河道垃圾并跟踪处理进度</span>
+            <span class="portal-tags">${patrolPoints.map((p) => `<i>${p}</i>`).join('')}</span>
+          </span>
+          <span class="portal-arrow">${icon('arrow-right', 20)}</span>
+        </button>
+      </div>
+      <p class="portal-foot">${isMobile ? '移动端已为您默认进入「巡河员」视图，可随时在右上角切换身份。' : '选择身份进入工作台，右上角可随时切换身份。'}</p>
+    </div>`;
+}
+function renderMyTasks() {
+  const me = state.data?.currentUser?.name || '当前用户';
+  const mine = state.data.tasks.filter((task) =>
+    String(task.reporter || '').includes('当前用户') || String(task.reporter || '') === me || task.reporter === me);
+  if (!mine.length) {
+    return `<section class="panel empty-state">
+      <span class="empty-icon">${icon('clipboard-list', 26)}</span>
+      <h2>还没有上报记录</h2>
+      <p>上传一张现场照片，识别结果会出现在这里，并持续跟踪处置进度。</p>
+      <button class="button button-primary" data-view="report">${icon('plus', 16)}去上报</button>
+    </section>`;
+  }
+  return `<section class="panel my-task-list">
+    <div class="task-toolbar"><div><span class="eyebrow">我的上报</span><h2 class="my-task-title">共 ${mine.length} 条记录</h2></div>
+    <button class="button button-primary" data-view="report">${icon('plus', 16)}新建上报</button></div>
+    <div class="my-task-rows">
+      ${mine.map((task) => `
+        <button class="my-task-row" data-task-id="${task.id}" type="button">
+          ${task.image ? `<span class="my-task-thumb"><img src="${task.image}" alt="" loading="lazy"/></span>` : '<span class="my-task-thumb none"></span>'}
+          <span class="my-task-main"><strong>${esc(task.segmentName || task.location || task.id)}</strong><small>${esc(task.id)} · ${esc(task.capturedAt || '刚刚上报')}</small>
+            <span class="my-task-badges">${badge(task.risk)}${badge(task.status)}</span></span>
+          <span class="my-task-meta"><span class="cat">${esc(task.category)}</span>${task.count ? `<small>${task.count} 个目标 · ${Math.round(task.confidence * 100)}%</small>` : '<small>识别处理中…</small>'}</span>
+          ${icon('chevron-right', 17)}
+        </button>`).join('')}
+    </div>
+  </section>`;
+}
+
 function renderView() {
   if (state.loading) return renderLoading();
-  const views = { dashboard: renderDashboard, report: renderReport, tasks: renderTasks, map: renderMap, statistics: renderStatistics, admin: renderAdmin };
-  return views[state.view]();
+  const views = { dashboard: renderDashboard, report: renderReport, tasks: renderTasks, map: renderMap, statistics: renderStatistics, admin: renderAdmin, myTasks: renderMyTasks };
+  const allowed = (roleNav[state.role] || navItems).map((item) => item.id);
+  const view = allowed.includes(state.view) ? state.view : viewForRole[state.role] || 'dashboard';
+  return views[view]();
 }
 
 function render() {
@@ -379,13 +454,37 @@ function render() {
     destroyAmapMap(amapMapInstance);
     amapMapInstance = null;
   }
-  app.innerHTML = state.loading ? renderLoading() : shell(renderView());
+  if (state.loading) {
+    app.innerHTML = renderLoading();
+  } else if (!state.role) {
+    app.innerHTML = renderPortal();
+  } else {
+    app.innerHTML = shell(renderView());
+  }
   createIcons({ icons });
   bindEvents();
   queueMicrotask(initVisuals);
 }
 
 function bindEvents() {
+  document.querySelectorAll('[data-role-select]').forEach((element) => element.addEventListener('click', () => {
+    const role = /** @type {HTMLElement} */ (element).dataset.roleSelect;
+    state.role = /** @type {'admin'|'patrol'} */ (role);
+    state.view = viewForRole[state.role];
+    state.navOpen = false;
+    history.replaceState(null, '', `#${state.view}`);
+    render();
+  }));
+
+  document.querySelector('[data-role-switch]')?.addEventListener('change', (event) => {
+    const role = /** @type {HTMLSelectElement} */ (event.target).value;
+    state.role = /** @type {'admin'|'patrol'} */ (role);
+    const allowed = roleNav[state.role].map((item) => item.id);
+    if (!allowed.includes(state.view)) state.view = viewForRole[state.role];
+    history.replaceState(null, '', `#${state.view}`);
+    render();
+  });
+
   document.querySelectorAll('[data-view]').forEach((element) => element.addEventListener('click', () => {
     const target = /** @type {HTMLElement} */ (element);
     state.view = target.dataset.view;
@@ -420,7 +519,7 @@ function bindEvents() {
   globalSearch?.addEventListener('keydown', (event) => {
     if (/** @type {KeyboardEvent} */ (event).key === 'Enter' && globalSearch.value.trim()) {
       state.filters.keyword = globalSearch.value;
-      state.view = 'tasks';
+      state.view = state.role === 'admin' ? 'tasks' : 'myTasks';
       render();
     }
   });
@@ -456,7 +555,20 @@ function bindReportForm() {
     createIcons({ icons });
     preview.querySelector('[data-remove-file]').addEventListener('click', () => { input.value = ''; preview.classList.add('hidden'); });
   });
-  document.querySelector('[data-action="locate"]')?.addEventListener('click', () => showToast('已使用演示坐标。真实接入时浏览器将请求定位权限。'));
+  document.querySelector('[data-action="locate"]')?.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      showToast('当前浏览器不支持定位，请手动输入坐标或选择河段。', 'error');
+      return;
+    }
+    showToast('正在获取当前位置…');
+    navigator.geolocation.getCurrentPosition((position) => {
+      const latInput = /** @type {HTMLInputElement|null} */ (document.querySelector('[name="latitude"]'));
+      const lngInput = /** @type {HTMLInputElement|null} */ (document.querySelector('[name="longitude"]'));
+      if (latInput) latInput.value = position.coords.latitude.toFixed(6);
+      if (lngInput) lngInput.value = position.coords.longitude.toFixed(6);
+      showToast('已获取当前位置。', 'success');
+    }, () => showToast('定位失败或未授权，请手动选择河段或输入坐标。', 'error'), { enableHighAccuracy: true, timeout: 10000 });
+  });
   document.querySelector('#report-form')?.addEventListener('submit', submitReport);
 }
 
@@ -502,7 +614,7 @@ async function submitReport(event) {
     state.data.tasks.unshift(...createdTasks);
     showToast(`${results.length} 个识别任务已进入队列。`, 'success');
     if (modelFailures.length) showToast(`${modelFailures.length} 个任务已完成识别，但大模型研判暂时失败。`, 'error');
-    setTimeout(() => { state.view = 'tasks'; render(); }, 700);
+    setTimeout(() => { state.view = state.role === 'patrol' ? 'myTasks' : 'tasks'; render(); }, 700);
   } catch (error) {
     showToast(error.message || '创建任务失败。', 'error');
     submit.disabled = false;
@@ -569,7 +681,9 @@ function openTask(taskId) {
       <section class="analysis-block"><h3>模型摘要${task.modelStatus === 'completed' ? ' · 大模型研判' : ''}</h3><p>${esc(task.summary)}</p>${task.modelError ? `<p class="model-error">${esc(task.modelError)}</p>` : ''}<h3>处置建议</h3><p>${esc(task.recommendation)}</p></section>
       <section class="process-track"><h3>流程进度</h3><div><span class="done"><i>${icon('check', 13)}</i><b>照片上报</b></span><span class="done"><i>${icon('check', 13)}</i><b>智能识别</b></span><span class="${task.status === '待核查' ? 'current' : 'done'}"><i>${task.status === '待核查' ? '3' : icon('check', 13)}</i><b>业务研判</b></span><span class="${['已派单','清理中','待核验','已清理'].includes(task.status) ? 'current' : ''}"><i>4</i><b>处置闭环</b></span></div></section>
     </div>
-    <footer><button class="button button-secondary" data-close-overlay>关闭</button><button class="button button-secondary" data-action="map-task">${icon('map', 17)}地图定位</button>${task.status === '待核查' ? `<button class="button button-primary" data-action="review-task">${icon('file-check-2', 17)}人工复核</button>` : task.status === '待派单' ? `<button class="button button-primary" data-action="assign-task">${icon('user-round-plus', 17)}立即派单</button>` : `<button class="button button-primary">${icon('external-link', 17)}查看处置单</button>`}</footer>
+    <footer>${state.role === 'patrol'
+      ? `<span class="drawer-hint">${['已完成', '已清理'].includes(task.status) ? '该上报已处置完成，感谢反馈。' : '上报已受理，处置进展会持续更新。'}</span><button class="button button-secondary" data-close-overlay>关闭</button>`
+      : `<button class="button button-secondary" data-close-overlay>关闭</button><button class="button button-secondary" data-action="map-task">${icon('map', 17)}地图定位</button>${task.status === '待核查' ? `<button class="button button-primary" data-action="review-task">${icon('file-check-2', 17)}人工复核</button>` : task.status === '待派单' ? `<button class="button button-primary" data-action="assign-task">${icon('user-round-plus', 17)}立即派单</button>` : `<button class="button button-primary">${icon('external-link', 17)}查看处置单</button>`}`}</footer>
   </aside></div>`;
   createIcons({ icons });
   root.querySelectorAll('[data-close-overlay]').forEach((element) => element.addEventListener('click', closeOverlay));
@@ -658,10 +772,10 @@ function initTrendChart(id, filled) {
   const chart = new Chart(canvas, {
     type: 'line',
     data: { labels: state.data.weeklyTrend.labels, datasets: [
-      { label: '上报', data: state.data.weeklyTrend.reports, borderColor: '#2dd4a7', backgroundColor: 'rgba(45,212,167,.14)', fill: filled, tension: .38, pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: '#2dd4a7', borderWidth: 2 },
-      { label: '已闭环', data: state.data.weeklyTrend.disposed, borderColor: '#f0a03c', backgroundColor: 'transparent', fill: false, tension: .38, pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: '#f0a03c', borderWidth: 2 },
+      { label: '上报', data: state.data.weeklyTrend.reports, borderColor: '#0F6E56', backgroundColor: 'rgba(15,110,86,.12)', fill: filled, tension: .38, pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: '#0F6E56', borderWidth: 2 },
+      { label: '已闭环', data: state.data.weeklyTrend.disposed, borderColor: '#BA7517', backgroundColor: 'transparent', fill: false, tension: .38, pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: '#BA7517', borderWidth: 2 },
     ]},
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#0b1613', padding: 12, cornerRadius: 10, boxPadding: 4, titleColor: '#e8f1ec', bodyColor: 'rgba(232,241,236,.65)', borderColor: 'rgba(255,255,255,.1)', borderWidth: 1, displayColors: true } }, scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: 'rgba(232,241,236,.42)', font: { size: 11 } } }, y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,.06)' }, border: { display: false }, ticks: { color: 'rgba(232,241,236,.42)', stepSize: 5, font: { size: 11 } } } } },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#0F6E56', padding: 12, cornerRadius: 10, boxPadding: 4, titleColor: '#ffffff', bodyColor: 'rgba(255,255,255,.88)', borderColor: 'rgba(255,255,255,.14)', borderWidth: 1, displayColors: true } }, scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: 'rgba(20,60,50,.55)', font: { size: 11 } } }, y: { beginAtZero: true, grid: { color: 'rgba(15,110,86,.09)' }, border: { display: false }, ticks: { color: 'rgba(20,60,50,.55)', stepSize: 5, font: { size: 11 } } } } },
   });
   chartInstances.push(chart);
 }
@@ -701,7 +815,7 @@ async function initMap() {
   }
   mapInstance = L.map(container, { zoomControl: false }).setView([30.272, 120.169], 12);
   L.control.zoom({ position: 'bottomright' }).addTo(mapInstance);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(mapInstance);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(mapInstance);
   mapInstance.on('popupopen', () => document.querySelector('[data-popup-task]')?.addEventListener('click', (event) => openTask(/** @type {HTMLElement} */ (event.currentTarget).dataset.popupTask)));
   getMapTasks().forEach((task) => {
     const tone = task.risk === '高' ? '#f0655e' : task.risk === '中' ? '#f0a03c' : '#2dd4a7';
@@ -720,8 +834,15 @@ async function bootstrap() {
   try {
     state.data = await api.getBootstrap();
     state.loading = false;
+    const urlRole = new URLSearchParams(location.search).get('role');
+    state.role = urlRole === 'admin' || urlRole === 'patrol' ? urlRole : (isMobile ? 'patrol' : null); // ?role= 可直达；移动端默认巡河员；桌面进入身份门户
     const requestedView = location.hash.slice(1);
-    if (navItems.some((item) => item.id === requestedView)) state.view = requestedView;
+    const allowedIds = state.role ? roleNav[state.role].map((item) => item.id) : navItems.map((item) => item.id);
+    if (allowedIds.includes(requestedView)) {
+      state.view = requestedView;
+    } else {
+      state.view = state.role === 'patrol' ? 'report' : 'dashboard';
+    }
     render();
     maybeShowCover();
   } catch (error) {
@@ -730,8 +851,8 @@ async function bootstrap() {
   }
 }
 
-/* ---------- 封面（Lithos 式光标聚光灯揭示，每个标签页会话展示一次） ---------- */
-const COVER_KEY = 'qingchuan.cover.v1';
+/* ---------- 封面（已弃用：改为身份门户，入口见 renderPortal） ---------- */
+const COVER_KEY = 'qingchuan.cover.v2';
 
 function maybeShowCover() {
   try {
