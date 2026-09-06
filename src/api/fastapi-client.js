@@ -37,6 +37,9 @@ function riskFor(objects, confidence) {
  */
 export function normalizeFastApiResult(data, { id = `FASTAPI-${Date.now()}`, image = '' } = {}) {
   const payload = data?.result ?? data?.data ?? data ?? {};
+  const annotatedSrc = payload.annotated_image_b64
+    ? `data:image/jpeg;base64,${payload.annotated_image_b64}`
+    : '';
   const objects = Array.isArray(payload.objects) ? payload.objects : [];
   const confidence = objects.length
     ? Math.max(...objects.map((item) => numberOrNull(item.confidence) ?? 0))
@@ -68,7 +71,7 @@ export function normalizeFastApiResult(data, { id = `FASTAPI-${Date.now()}`, ima
     due: '待核查后确定',
     summary: `FastAPI 识别到 ${numberOrNull(payload.num_objects) ?? objects.length} 个目标，最高置信度 ${(confidence * 100).toFixed(1)}%。`,
     recommendation: '请结合现场情况完成业务复核，再决定是否派出处置任务。',
-    image,
+    image: image || annotatedSrc,
     inferenceTimeMs: numberOrNull(payload.inference_time_ms),
     imageSize: payload.image_size || null,
     objects,
@@ -149,7 +152,11 @@ export function createFastApiClient({
       if (payload.latitude != null) form.set('latitude', String(payload.latitude));
       if (payload.longitude != null) form.set('longitude', String(payload.longitude));
       const result = await request(processPath, { method: 'POST', body: form });
-      const task = normalizeFastApiResult(result, { image: objectUrl(payload.image) });
+      const responseData = result?.result ?? result?.data ?? result;
+      const annotatedSrc = responseData?.annotated_image_b64
+        ? `data:image/jpeg;base64,${responseData.annotated_image_b64}`
+        : '';
+      const task = normalizeFastApiResult(result, { image: annotatedSrc || objectUrl(payload.image) });
       const bootstrap = await bootstrapClient.getBootstrap();
       const segment = (bootstrap.riverSegments || []).find((item) => item.id === payload.riverSegmentId);
       if (segment) {
