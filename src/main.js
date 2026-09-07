@@ -76,8 +76,8 @@ const state = {
 };
 
 const navItems = [
-  { id: 'dashboard', label: '调度总览', icon: 'layout-dashboard' },
   { id: 'report', label: '新建上报', icon: 'upload-cloud' },
+  { id: 'dashboard', label: '调度总览', icon: 'layout-dashboard' },
   { id: 'tasks', label: '任务与处置', icon: 'clipboard-list', badge: '8' },
   { id: 'map', label: '河道地图', icon: 'map' },
   { id: 'statistics', label: '数据统计', icon: 'chart-no-axes-column-increasing' },
@@ -102,7 +102,7 @@ const roleNav = {
   ],
 };
 viewMeta.myTasks = ['我的上报', '查看我上报的识别任务与处理进度。'];
-const viewForRole = { admin: 'dashboard', patrol: 'report' };
+const viewForRole = { admin: 'report', patrol: 'report' };
 const isMobile = /Android|iPhone|iPad|iPod|Mobile|Opera Mini|IEMobile|Windows Phone/i.test(navigator.userAgent);
 
 function esc(value = '') {
@@ -373,7 +373,7 @@ function renderLoading() {
 }
 
 function renderPortal() {
-  const adminPoints = ['调度总览', '任务复核与派单', '河道地图', '数据统计', '系统管理'];
+  const adminPoints = ['现场上报', '调度总览', '任务复核与派单', '河道地图', '数据统计'];
   const patrolPoints = ['现场拍照上传', 'AI 智能识别', '上报进度跟踪'];
   return `
     <div class="portal-page">

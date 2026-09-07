@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
   server: {
@@ -13,6 +14,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    setupFiles: ['./tests/setup.js'],
+    // 基于配置文件自身解析，保证任何工作目录下都能定位 tests/setup.js
+    setupFiles: [fileURLToPath(new URL('./tests/setup.js', import.meta.url))],
   },
 });
