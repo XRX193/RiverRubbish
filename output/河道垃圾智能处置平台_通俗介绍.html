@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>河道垃圾智能处置平台——产品与技术方案简介</title>
+<style>
+  body { font-family: "SimSun", "宋体", serif; color: #222; }
+  h1 { font-family: "SimHei", "黑体", sans-serif; font-size: 20pt; text-align: center; margin-bottom: 6pt; }
+  .subtitle { font-family: "SimSun", "宋体", serif; font-size: 10.5pt; color: #666; text-align: center; margin-bottom: 18pt; }
+  h2 { font-family: "SimHei", "黑体", sans-serif; font-size: 15pt; margin-top: 18pt; margin-bottom: 8pt; }
+  h3 { font-family: "SimHei", "黑体", sans-serif; font-size: 12.5pt; margin-top: 12pt; margin-bottom: 5pt; }
+  p { font-family: "SimSun", "宋体", serif; font-size: 12pt; line-height: 1.6; margin: 6pt 0; text-indent: 2em; }
+  p.no-indent { text-indent: 0; }
+  li { font-family: "SimSun", "宋体", serif; font-size: 12pt; line-height: 1.6; margin: 4pt 0; }
+</style>
+</head>
+<body>
+
+<h1>河道垃圾智能处置平台</h1>
+<p class="subtitle">产品与技术方案简介</p>
+
+<p>本平台面向河道保洁业务的智能化管理需求，基于"目标检测 + 大语言模型"双模型流水线，将河道垃圾的发现、识别、研判、派单、清理与核验全流程数字化，形成一套责任可追溯、数据可沉淀的闭环管理系统。</p>
+
+<h2>一、技术架构</h2>
+<p>平台采用前后端分离架构，核心组件如下：</p>
+<ul>
+  <li><strong>Web 后端</strong>：基于 FastAPI + Uvicorn 开发，采用 SQLAlchemy ORM 与 Alembic 数据库迁移，数据存储于 SQLite。</li>
+  <li><strong>前端</strong>：原生 JavaScript 单页应用（SPA），地图基于 Leaflet + OpenStreetMap 瓦片。</li>
+  <li><strong>识别引擎</strong>：接入远程目标检测模型（FastAPI 推理服务），输出垃圾类别、置信度、检测数量与覆盖程度。</li>
+  <li><strong>分析引擎</strong>：接入大语言模型（LLM，OpenAI 兼容 Chat Completions 接口），生成统一分类、风险评估与处置建议。</li>
+  <li><strong>任务调度</strong>：SQLite 租约队列 + 独立 Worker 异步处理，配合幂等键与分级重试保证可靠性。</li>
+</ul>
+
+<h2>二、解决的核心问题</h2>
+
+<h3>1. 识别依赖人工经验、判定标准不一</h3>
+<p>传统巡河靠肉眼判断垃圾类型与危害程度，标准因人而异、易漏检。平台以计算机视觉自动识别替代人工初判，并将识别结果映射为统一的 7 类垃圾体系，实现判定标准化。</p>
+
+<h3>2. 处置流程割裂、责任不清</h3>
+<p>此前上报、派单、清理、验收各环节依赖口头沟通，进度不透明、责任难追溯。平台建立"上报 → 识别 → 分析 → 复核 → 派单 → 清理 → 核验"的全流程状态机，各节点责任到人、操作留痕。</p>
+
+<h3>3. 模型结果可信度不足</h3>
+<p>为防止模型误判直接造成漏处理，平台采用确定性规则优先、大模型仅作解释的机制：危险废弃物强制高风险，低置信度强制转人工复核；模型原始结论与人工最终结论分层存储、互不覆盖，保证结论可追溯、可纠偏。</p>
+
+<h3>4. 数据与权限安全</h3>
+<p>系统实施 RBAC 角色权限隔离（巡河员 / 调度员 / 管理员），密码采用 Argon2 哈希，会话使用 JWT HttpOnly Cookie，日志脱敏，识别原图处理完成后立即删除，从源头控制敏感信息外泄风险。</p>
+
+<h2>三、核心能力</h2>
+<ul>
+  <li>双模型流水线：目标检测 + 大语言模型协同完成识别、研判与建议生成。</li>
+  <li>统一分类体系：塑料制品、泡沫、生活垃圾、渔业废弃物、漂浮植物、危险废弃物疑似、其他等 7 类。</li>
+  <li>风险规则引擎：确定性规则计算风险等级与处置优先级，支持自定义阈值。</li>
+  <li>异步任务队列：租约机制保证 Worker 重启不丢任务，幂等键避免重复推理。</li>
+  <li>处置闭环状态机：待派单、已派单、清理中、待核验、已清理、已取消全状态流转。</li>
+  <li>疑似重复点位提示：同河段 50 米内、24 小时内同类上报自动提示，不自动合并。</li>
+  <li>态势地图、数据统计、CSV 导出、审计日志与每日备份。</li>
+  <li>元数据自动化：自动读取照片 EXIF 拍摄时间与 GPS 坐标，减少人工录入。</li>
+</ul>
+
+<h2>四、当前进展</h2>
+<p>目前已完成为前端控制台原型（原生 JavaScript SPA，含示例数据与直连识别 / 大模型客户端），可完整演示交互与业务流程；后端 Web 服务与异步 Worker 依据设计方案待实现。</p>
+
+</body>
+</html>

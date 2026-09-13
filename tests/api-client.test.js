@@ -14,8 +14,8 @@ describe('platform API client', () => {
       image: new File(['river'], 'river.jpg', { type: 'image/jpeg' }),
       riverSegmentId: 'SEG-01',
       capturedAt: '2026-09-02T08:30',
-      latitude: 30.2741,
-      longitude: 120.1551,
+      latitude: 30.3145,
+      longitude: 120.1406,
       locationChangeReason: '',
     };
 

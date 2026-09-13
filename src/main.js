@@ -3,7 +3,7 @@ import { initCover } from './motion.js';
 import 'leaflet/dist/leaflet.css';
 import { Chart, registerables } from 'chart.js';
 import L from 'leaflet';
-import { createAmapMap, destroyAmapMap } from './map/amap-map.js';
+import { createAmapMap, destroyAmapMap, preloadAmap, warmAmapTiles } from './map/amap-map.js';
 import {
   Activity, ArrowRight, Bell, Bot, CalendarDays, Camera, ChartNoAxesColumnIncreasing,
   Check, ChevronLeft, ChevronRight, ChevronsUpDown, CircleAlert, CircleCheck,
@@ -19,6 +19,7 @@ import { createFastApiClient } from './api/fastapi-client.js';
 import { createLlmClient } from './api/llm-client.js';
 import { createMockClient } from './api/mock-client.js';
 import { filterTasks, summarizeTasks } from './domain/task-query.js';
+import { readExifCapturedAt, toDateTimeLocalValue, toDisplayValue } from './exif.js';
 
 Chart.register(...registerables);
 
@@ -56,6 +57,7 @@ const llm = llmMode === 'off'
 const mapProvider = import.meta.env.VITE_MAP_PROVIDER || 'amap';
 const amapKey = import.meta.env.VITE_AMAP_KEY || '';
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || '';
+const DEFAULT_REPORT_LOCATION = Object.freeze({ latitude: 30.3145, longitude: 120.1406 });
 
 const app = document.querySelector('#app');
 const chartInstances = [];
@@ -73,27 +75,30 @@ const state = {
   filters: { keyword: '', risk: '', status: '', category: '' },
   mapFilters: { segment: '', risk: '', status: '' },
   mapFocusTaskId: null,
+  mapIntro: false, // 管理员进入时播放「全屏大地图 → 缩小回正常」入场
 };
 
+/* 管理员导航：不含「新建上报」，上报职责专属巡河员 */
 const navItems = [
-  { id: 'report', label: '新建上报', icon: 'upload-cloud' },
+  { id: 'map', label: '河道地图', icon: 'map' },
   { id: 'dashboard', label: '调度总览', icon: 'layout-dashboard' },
   { id: 'tasks', label: '任务与处置', icon: 'clipboard-list', badge: '8' },
-  { id: 'map', label: '河道地图', icon: 'map' },
   { id: 'statistics', label: '数据统计', icon: 'chart-no-axes-column-increasing' },
   { id: 'admin', label: '系统管理', icon: 'settings' },
 ];
 
 const viewMeta = {
   dashboard: ['调度总览', '聚焦异常、风险和待办，让处置节奏保持清晰。'],
-  report: ['新建巡河上报', '一张照片建立一个识别任务，位置与时间由上报人最终确认。'],
+  report: ['新建巡河上报', '一张照片建立一个识别任务，拍摄时间自动读取照片 EXIF。'],
   tasks: ['任务与处置', '查询分析任务，完成复核、派单、清理与核验闭环。'],
   map: ['河道态势地图', '按风险和处置状态查看已确认坐标的现场点位。'],
   statistics: ['数据统计', '观察上报趋势、垃圾构成与处置履约情况。'],
-  admin: ['系统管理', '维护河段、账号与仅服务端可见的模型集成状态。'],
+  admin: ['系统管理', '维护河段档案与仅服务端可见的模型集成状态。'],
 };
 
-/* 按角色过滤导航：管理员完整工作台；巡河员仅上报与我的上报 */
+/* 角色职责边界：
+ * 管理员 —— 调度统筹：地图态势、复核、派单、统计与系统集成，不发起现场上报；
+ * 巡河员 —— 一线执行：现场拍照上报，并跟踪本人上报任务的处置进度。 */
 const roleNav = {
   admin: navItems,
   patrol: [
@@ -102,7 +107,7 @@ const roleNav = {
   ],
 };
 viewMeta.myTasks = ['我的上报', '查看我上报的识别任务与处理进度。'];
-const viewForRole = { admin: 'report', patrol: 'report' };
+const viewForRole = { admin: 'map', patrol: 'report' };
 const isMobile = /Android|iPhone|iPad|iPod|Mobile|Opera Mini|IEMobile|Windows Phone/i.test(navigator.userAgent);
 
 function esc(value = '') {
@@ -156,8 +161,8 @@ function shell(content) {
           ${isAdmin ? `
             <div class="global-search">${icon('search', 16)}<input type="search" data-global-search placeholder="搜索任务、河段或人员" aria-label="全局搜索"/></div>
             <button class="icon-button" data-action="notifications" title="通知" aria-label="通知">${icon('bell')}<span></span></button>
-            ${state.view !== 'report' ? `<button class="button button-primary desktop-create" data-view="report">${icon('plus', 16)}新建上报</button>` : ''}`
-          : `<span class="role-chip patrol"><i class="pulse-dot"></i>巡河员视图</span>`}
+            <span class="role-chip admin"><i class="pulse-dot"></i>管理员视图 · 调度统筹</span>`
+          : `<span class="role-chip patrol"><i class="pulse-dot"></i>巡河员视图 · 现场上报</span>`}
           <label class="role-switch" title="切换身份视图">
             <span>${icon('chevrons-up-down', 13)}身份</span>
             <select data-role-switch aria-label="切换身份">
@@ -261,16 +266,22 @@ function renderReport() {
       </label>
       <div id="file-preview" class="file-preview hidden"></div>
       <div class="form-divider"></div>
-      <div class="form-intro"><span class="step-number">02</span><div><h2>河段与时间</h2><p>EXIF 信息仅作初值，请确认现场记录。</p></div></div>
+      <div class="form-intro"><span class="step-number">02</span><div><h2>河段与时间</h2><p>河段可自由输入，系统实时给出候选提示；拍摄时间自动读取照片 EXIF。</p></div></div>
       <div class="form-grid">
-        <label><span>所属河段 *</span><select name="riverSegmentId" required><option value="">请选择河段</option>${state.data.riverSegments.filter((item) => item.status === '启用').map((item) => `<option value="${item.id}">${esc(item.name)} · ${esc(item.area)}</option>`).join('')}</select></label>
-        <label><span>拍摄时间 *</span><input name="capturedAt" type="datetime-local" value="2026-09-02T16:36" required /></label>
+        <label class="segment-field"><span>所属河段 *</span>
+          <input name="riverSegment" type="text" autocomplete="off" spellcheck="false" placeholder="输入河段名称，如：京杭大运河" required />
+          <div class="segment-suggest hidden" role="listbox" aria-label="河段候选"></div>
+        </label>
+        <label><span>拍摄时间 <em>自动读取照片 EXIF</em></span>
+          <input class="captured-display" type="text" value="选择照片后自动填入" readonly tabindex="-1" />
+          <input name="capturedAt" type="hidden" />
+        </label>
       </div>
       <div class="form-divider"></div>
       <div class="form-intro"><span class="step-number">03</span><div><h2>现场位置</h2><p>可使用照片坐标、当前定位或手动输入。</p></div></div>
       <div class="location-fields">
-        <label><span>纬度</span><input name="latitude" inputmode="decimal" value="30.2741" placeholder="例如 30.2741" /></label>
-        <label><span>经度</span><input name="longitude" inputmode="decimal" value="120.1551" placeholder="例如 120.1551" /></label>
+        <label><span>纬度</span><input name="latitude" inputmode="decimal" value="${DEFAULT_REPORT_LOCATION.latitude}" placeholder="例如 ${DEFAULT_REPORT_LOCATION.latitude}" /></label>
+        <label><span>经度</span><input name="longitude" inputmode="decimal" value="${DEFAULT_REPORT_LOCATION.longitude}" placeholder="例如 ${DEFAULT_REPORT_LOCATION.longitude}" /></label>
         <button class="button button-secondary locate-button" type="button" data-action="locate">${icon('locate-fixed', 17)}当前定位</button>
       </div>
       <label class="full-field"><span>位置修改原因 <em>手动修改坐标时必填</em></span><input name="locationChangeReason" placeholder="例如：照片定位偏移，已按现场位置修正" /></label>
@@ -289,7 +300,7 @@ function renderTasks() {
   return `<section class="panel task-workspace">
     <div class="task-toolbar">
       <div class="segmented" role="tablist"><button class="active">全部任务 <b>${state.data.tasks.length}</b></button><button>待复核 <b>1</b></button><button>处置单 <b>5</b></button></div>
-      <div class="task-tools"><button class="button button-secondary">${icon('download', 16)}导出 CSV</button><button class="button button-primary" data-view="report">${icon('plus', 16)}新建上报</button></div>
+      <div class="task-tools"><button class="button button-secondary">${icon('download', 16)}导出 CSV</button></div>
     </div>
     <div class="filter-bar">
       <label class="filter-search">${icon('search', 16)}<input data-filter="keyword" value="${esc(state.filters.keyword)}" placeholder="搜索任务编号、河段、人员" /></label>
@@ -316,7 +327,7 @@ function renderTasks() {
 function renderMap() {
   const visibleTasks = getMapTasks();
   const riskCount = (risk) => visibleTasks.filter((task) => task.risk === risk).length;
-  return `<section class="map-workspace">
+  return `<section class="map-workspace ${state.mapIntro ? 'map-intro' : ''}">
     <div class="map-toolbar panel">
       <div class="map-filter-group"><label>${icon('map-pin', 15)}<select data-map-filter="segment"><option value="">全部河段</option>${state.data.riverSegments.map((segment) => `<option value="${segment.id}" ${state.mapFilters.segment === segment.id ? 'selected' : ''}>${esc(segment.name)}</option>`).join('')}</select></label><label>${icon('triangle-alert', 15)}<select data-map-filter="risk"><option value="">全部风险</option><option value="高" ${state.mapFilters.risk === '高' ? 'selected' : ''}>高风险</option><option value="中" ${state.mapFilters.risk === '中' ? 'selected' : ''}>中风险</option><option value="低" ${state.mapFilters.risk === '低' ? 'selected' : ''}>低风险</option></select></label><label>${icon('clipboard-list', 15)}<select data-map-filter="status"><option value="">全部状态</option><option value="待处置" ${state.mapFilters.status === '待处置' ? 'selected' : ''}>待处置</option><option value="处置中" ${state.mapFilters.status === '处置中' ? 'selected' : ''}>处置中</option><option value="已闭环" ${state.mapFilters.status === '已闭环' ? 'selected' : ''}>已闭环</option></select></label></div>
       <div class="map-stats"><span><i class="map-dot high"></i>高风险 ${riskCount('高')}</span><span><i class="map-dot medium"></i>中风险 ${riskCount('中')}</span><span><i class="map-dot low"></i>低风险 ${riskCount('低')}</span></div>
@@ -337,6 +348,135 @@ function getMapTasks() {
     });
 }
 
+/** 两点的近似球面距离（km），用于标点聚类。 */
+function distanceKm(a, b) {
+  const dLat = (a.lat - b.lat) * 111;
+  const dLng = (a.lng - b.lng) * 111 * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+  return Math.hypot(dLat, dLng);
+}
+
+/**
+ * 找出标点最密集的地段：以 2.2km 邻域做连通聚类，
+ * 返回点数最多（并列时取更紧凑）的一簇的质心与包围盒。
+ */
+function densestCluster(tasks) {
+  const points = (tasks || []).filter((task) => Number.isFinite(task.lat) && Number.isFinite(task.lng));
+  if (!points.length) return null;
+  const EPS_KM = 2.2;
+  const parent = points.map((_, index) => index);
+  const find = (i) => {
+    let root = i;
+    while (parent[root] !== root) root = parent[root];
+    while (parent[i] !== root) { const next = parent[i]; parent[i] = root; i = next; }
+    return root;
+  };
+  const union = (i, j) => { const a = find(i); const b = find(j); if (a !== b) parent[a] = b; };
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      if (distanceKm(points[i], points[j]) <= EPS_KM) union(i, j);
+    }
+  }
+  const groups = new globalThis.Map(); // 注意：Map 已被 lucide 图标占用，需显式取全局构造器
+  points.forEach((point, index) => {
+    const root = find(index);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(point);
+  });
+  /** @type {any} */
+  let best = null;
+  groups.forEach((group) => {
+    let sum = 0;
+    let pairs = 0;
+    for (let i = 0; i < group.length; i += 1) {
+      for (let j = i + 1; j < group.length; j += 1) { sum += distanceKm(group[i], group[j]); pairs += 1; }
+    }
+    const tightness = pairs ? sum / pairs : 0;
+    if (!best || group.length > best.group.length || (group.length === best.group.length && tightness < best.tightness)) {
+      best = { group, tightness };
+    }
+  });
+  if (!best || !best.group.length) return null;
+  const count = best.group.length;
+  return {
+    count,
+    lat: best.group.reduce((sum, task) => sum + task.lat, 0) / count,
+    lng: best.group.reduce((sum, task) => sum + task.lng, 0) / count,
+  };
+}
+
+/* ---------- 地图预加载（页面打开即开始） ---------- */
+let mapSdkPreloaded = false;
+let mapTilesWarmed = false;
+
+/** 经纬度 → 指定缩放级别下的瓦片编号（Web Mercator）。 */
+function lngLatToTile(lat, lng, zoom) {
+  const n = 2 ** zoom;
+  const latRad = lat * Math.PI / 180;
+  return {
+    x: Math.floor(((lng + 180) / 360) * n),
+    y: Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n),
+  };
+}
+
+/** 备用地图（Leaflet/CARTO）：预取密集地段与整体范围的瓦片。 */
+function preloadLeafletTiles() {
+  if (mapTilesWarmed) return;
+  const tasks = (state.data && state.data.tasks) || [];
+  const withCoords = tasks.filter((task) => Number.isFinite(task.lat) && Number.isFinite(task.lng));
+  const zones = [];
+  const cluster = densestCluster(getMapTasks());
+  if (cluster) zones.push({ lat: cluster.lat, lng: cluster.lng, zoom: cluster.count >= 4 ? 13 : 14, ring: 2 });
+  if (withCoords.length) {
+    zones.push({
+      lat: withCoords.reduce((sum, task) => sum + task.lat, 0) / withCoords.length,
+      lng: withCoords.reduce((sum, task) => sum + task.lng, 0) / withCoords.length,
+      zoom: 12,
+      ring: 1,
+    });
+  }
+  if (!zones.length) return;
+  mapTilesWarmed = true;
+  const subs = ['a', 'b', 'c'];
+  zones.forEach((zone, index) => {
+    const base = lngLatToTile(zone.lat, zone.lng, zone.zoom);
+    for (let dx = -zone.ring; dx <= zone.ring; dx += 1) {
+      for (let dy = -zone.ring; dy <= zone.ring; dy += 1) {
+        const y = base.y + dy;
+        if (y < 0) continue;
+        const tile = new Image();
+        tile.decoding = 'async';
+        tile.src = `https://${subs[(index + dx + dy + 6) % 3]}.basemaps.cartocdn.com/light_all/${zone.zoom}/${base.x + dx}/${y}.png`;
+      }
+    }
+  });
+}
+
+/**
+ * 页面一打开就预热地图：先缓存地图 SDK，数据到位后再预热最密集地段的瓦片。
+ * 目的是让管理员入场时的全屏大地图直接是已加载状态。
+ */
+function preloadMap() {
+  if (mapProvider === 'amap' && amapKey) {
+    if (!mapSdkPreloaded) {
+      mapSdkPreloaded = true;
+      preloadAmap(amapKey, amapSecurityCode);
+    }
+    if (!mapTilesWarmed && state.data) {
+      const cluster = densestCluster(getMapTasks());
+      mapTilesWarmed = true;
+      warmAmapTiles({
+        key: amapKey,
+        securityCode: amapSecurityCode,
+        lat: cluster ? cluster.lat : DEFAULT_REPORT_LOCATION.latitude,
+        lng: cluster ? cluster.lng : DEFAULT_REPORT_LOCATION.longitude,
+        zoom: cluster && cluster.count >= 4 ? 13 : 14,
+      });
+    }
+    return;
+  }
+  preloadLeafletTiles();
+}
+
 function renderStatistics() {
   const total = state.data.tasks.length;
   return `<section class="statistics-view">
@@ -351,7 +491,7 @@ function renderStatistics() {
 
 function renderAdmin() {
   return `<section class="admin-view">
-    <div class="admin-tabs"><button class="active">${icon('plug-zap', 17)}服务集成</button><button>${icon('users', 17)}账号管理</button><button>${icon('waves', 17)}河段档案</button><button>${icon('scroll-text', 17)}审计日志</button></div>
+    <div class="admin-tabs"><button class="active">${icon('plug-zap', 17)}服务集成</button><button>${icon('waves', 17)}河段档案</button><button>${icon('scroll-text', 17)}审计日志</button></div>
     <div class="integration-banner"><span class="banner-icon">${icon('shield-check', 23)}</span><div><strong>服务密钥保持在后端</strong><p>此页面只显示连接状态和脱敏配置。识别 FastAPI 与 LLM API Key 由 Worker 从服务器环境读取，不会下发至浏览器。</p></div><span class="security-label">符合安全边界</span></div>
     <div class="integration-grid">
       ${state.data.integrations.map((item, index) => `<article class="integration-card">
@@ -373,8 +513,8 @@ function renderLoading() {
 }
 
 function renderPortal() {
-  const adminPoints = ['现场上报', '调度总览', '任务复核与派单', '河道地图', '数据统计'];
-  const patrolPoints = ['现场拍照上传', 'AI 智能识别', '上报进度跟踪'];
+  const adminPoints = ['河道地图', '调度总览', '任务复核与派单', '数据统计', '系统集成'];
+  const patrolPoints = ['现场拍照上报', 'AI 智能识别', '上报进度跟踪'];
   return `
     <div class="portal-page">
       <div class="portal-water" aria-hidden="true"></div>
@@ -388,8 +528,8 @@ function renderPortal() {
         <button class="portal-card" data-role-select="admin" type="button">
           <span class="portal-icon admin">${icon('shield-check', 25)}</span>
           <span class="portal-copy">
-            <span class="portal-title"><strong>我是管理员</strong><em>完整工作台</em></span>
-            <span class="portal-desc">统筹调度、复核派单、查看河道地图与平台统计</span>
+            <span class="portal-title"><strong>我是管理员</strong><em>调度统筹 · 不发起上报</em></span>
+            <span class="portal-desc">进入即览河道地图，负责任务复核、派单调度与平台统计</span>
             <span class="portal-tags">${adminPoints.map((p) => `<i>${p}</i>`).join('')}</span>
           </span>
           <span class="portal-arrow">${icon('arrow-right', 20)}</span>
@@ -397,8 +537,8 @@ function renderPortal() {
         <button class="portal-card featured" data-role-select="patrol" type="button">
           <span class="portal-icon patrol">${icon('camera', 25)}</span>
           <span class="portal-copy">
-            <span class="portal-title"><strong>我是巡河员</strong><em>手机推荐 · 即拍即报</em></span>
-            <span class="portal-desc">现场拍照或选图，立即识别河道垃圾并跟踪处理进度</span>
+            <span class="portal-title"><strong>我是巡河员</strong><em>一线执行 · 即拍即报</em></span>
+            <span class="portal-desc">负责现场拍照上报，并跟踪本人上报任务的处置进度</span>
             <span class="portal-tags">${patrolPoints.map((p) => `<i>${p}</i>`).join('')}</span>
           </span>
           <span class="portal-arrow">${icon('arrow-right', 20)}</span>
@@ -471,6 +611,7 @@ function bindEvents() {
     const role = /** @type {HTMLElement} */ (element).dataset.roleSelect;
     state.role = /** @type {'admin'|'patrol'} */ (role);
     state.view = viewForRole[state.role];
+    state.mapIntro = state.role === 'admin'; // 管理员进入：先全屏大地图再缩小归位
     state.navOpen = false;
     history.replaceState(null, '', `#${state.view}`);
     render();
@@ -481,6 +622,7 @@ function bindEvents() {
     state.role = /** @type {'admin'|'patrol'} */ (role);
     const allowed = roleNav[state.role].map((item) => item.id);
     if (!allowed.includes(state.view)) state.view = viewForRole[state.role];
+    state.mapIntro = state.role === 'admin' && state.view === 'map';
     history.replaceState(null, '', `#${state.view}`);
     render();
   });
@@ -538,7 +680,71 @@ function keyboardHandler(event) {
   if (event.key === 'Escape') closeOverlay();
 }
 
+/** 从照片 EXIF 读取拍摄时间并自动填入表单；无 EXIF 时回退到文件修改时间。 */
+async function autofillCapturedTime(file, form) {
+  const hiddenInput = /** @type {HTMLInputElement|null} */ (form.querySelector('[name="capturedAt"]'));
+  const displayInput = /** @type {HTMLInputElement|null} */ (form.querySelector('.captured-display'));
+  if (!hiddenInput || !displayInput) return;
+  displayInput.value = '正在读取照片拍摄时间…';
+  let exifDate = null;
+  try {
+    exifDate = await readExifCapturedAt(file);
+  } catch (error) {
+    exifDate = null;
+  }
+  if (exifDate) {
+    hiddenInput.value = toDateTimeLocalValue(exifDate);
+    displayInput.value = `${toDisplayValue(exifDate)} · 来自照片 EXIF`;
+    return;
+  }
+  const fallback = new Date(file.lastModified || Date.now());
+  hiddenInput.value = toDateTimeLocalValue(fallback);
+  displayInput.value = file.type === 'image/jpeg'
+    ? `${toDisplayValue(fallback)} · 照片无 EXIF，取文件修改时间`
+    : `${toDisplayValue(fallback)} · 非 JPEG 无 EXIF，取文件修改时间`;
+}
+
+/** 所属河段自由输入 + 实时候选提示（交互类似填写收货地址）。 */
+function bindSegmentSuggest() {
+  const input = /** @type {HTMLInputElement|null} */ (document.querySelector('[name="riverSegment"]'));
+  const box = /** @type {HTMLElement|null} */ (document.querySelector('.segment-suggest'));
+  if (!input || !box) return;
+  const hide = () => { box.classList.add('hidden'); box.innerHTML = ''; };
+  const renderSuggest = () => {
+    const query = input.value.trim().toLowerCase();
+    const pool = state.data.riverSegments.filter((item) => item.status === '启用');
+    const matches = (query
+      ? pool.filter((item) => item.name.toLowerCase().includes(query)
+        || item.area.toLowerCase().includes(query)
+        || item.code.toLowerCase().includes(query))
+      : pool).slice(0, 6);
+    if (!matches.length) { hide(); return; }
+    box.innerHTML = matches.map((item) => `<button type="button" class="suggest-item" role="option" data-segment-name="${esc(item.name)}"><strong>${esc(item.name)}</strong><small>${esc(item.area)} · ${esc(item.code)}</small></button>`).join('');
+    box.classList.remove('hidden');
+    box.querySelectorAll('[data-segment-name]').forEach((button) => button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      input.value = /** @type {HTMLElement} */ (button).dataset.segmentName;
+      hide();
+    }));
+  };
+  input.addEventListener('input', renderSuggest);
+  input.addEventListener('focus', renderSuggest);
+  input.addEventListener('blur', () => setTimeout(hide, 120));
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { hide(); return; }
+    if (event.key === 'Enter' && !box.classList.contains('hidden')) {
+      const first = /** @type {HTMLElement|null} */ (box.querySelector('[data-segment-name]'));
+      if (first) {
+        event.preventDefault();
+        input.value = first.dataset.segmentName;
+        hide();
+      }
+    }
+  });
+}
+
 function bindReportForm() {
+  const form = /** @type {HTMLFormElement|null} */ (document.querySelector('#report-form'));
   const input = /** @type {HTMLInputElement|null} */ (document.querySelector('#report-image'));
   const preview = /** @type {HTMLElement|null} */ (document.querySelector('#file-preview'));
   input?.addEventListener('change', () => {
@@ -553,8 +759,17 @@ function bindReportForm() {
     const fileNames = files.map((file) => esc(file.name)).join('、');
     preview.innerHTML = `<img src="${URL.createObjectURL(files[0])}" alt="待上传照片预览"/><div><strong>${fileNames}</strong><span>${files.length} 张照片 · 每张均已通过大小预检</span></div><button type="button" class="icon-button" data-remove-file title="移除照片">${icon('x', 16)}</button>`;
     createIcons({ icons });
-    preview.querySelector('[data-remove-file]').addEventListener('click', () => { input.value = ''; preview.classList.add('hidden'); });
+    preview.querySelector('[data-remove-file]').addEventListener('click', () => {
+      input.value = '';
+      preview.classList.add('hidden');
+      const hiddenInput = /** @type {HTMLInputElement|null} */ (form?.querySelector('[name="capturedAt"]'));
+      const displayInput = /** @type {HTMLInputElement|null} */ (form?.querySelector('.captured-display'));
+      if (hiddenInput) hiddenInput.value = '';
+      if (displayInput) displayInput.value = '选择照片后自动填入';
+    });
+    autofillCapturedTime(files[0], form);
   });
+  bindSegmentSuggest();
   document.querySelector('[data-action="locate"]')?.addEventListener('click', () => {
     if (!navigator.geolocation) {
       showToast('当前浏览器不支持定位，请手动输入坐标或选择河段。', 'error');
@@ -580,10 +795,17 @@ async function submitReport(event) {
   const images = [...(/** @type {HTMLInputElement} */ (form.querySelector('#report-image')).files || [])];
   if (!images.length) return showToast('请先选择一张现场照片。', 'error');
   const formData = new FormData(form);
+  const segmentInput = String(formData.get('riverSegment') || '').trim();
+  if (!segmentInput) return showToast('请填写所属河段。', 'error');
+  const matchedSegment = state.data.riverSegments.find((item) => item.name === segmentInput)
+    || state.data.riverSegments.find((item) => item.name.includes(segmentInput));
+  const riverSegmentId = matchedSegment?.id || '';
+  const riverSegmentName = matchedSegment?.name || segmentInput;
+  if (!formData.get('capturedAt')) return showToast('未能读取拍摄时间，请重新选择照片。', 'error');
   const latitude = Number(formData.get('latitude')) || null;
   const longitude = Number(formData.get('longitude')) || null;
   const reason = String(formData.get('locationChangeReason') || '').trim();
-  if ((latitude !== 30.2741 || longitude !== 120.1551) && !reason) {
+  if ((latitude !== DEFAULT_REPORT_LOCATION.latitude || longitude !== DEFAULT_REPORT_LOCATION.longitude) && !reason) {
     return showToast('手动修改坐标时，请填写位置修改原因。', 'error');
   }
   submit.disabled = true;
@@ -593,7 +815,7 @@ async function submitReport(event) {
     const results = [];
     const modelFailures = [];
     for (const image of images) {
-      const result = await api.createTask({ image, riverSegmentId: formData.get('riverSegmentId'), capturedAt: formData.get('capturedAt'), latitude, longitude, locationChangeReason: reason });
+      const result = await api.createTask({ image, riverSegmentId, riverSegmentName, capturedAt: formData.get('capturedAt'), latitude, longitude, locationChangeReason: reason });
       if (llm && result?.objects) {
         try {
           Object.assign(result, await llm.analyzeRecognition(result), { modelStatus: 'completed' });
@@ -606,7 +828,8 @@ async function submitReport(event) {
     }
     const createdTasks = results.map((result, index) => taskRecordFromResult(result, {
       image: images[index],
-      riverSegmentId: formData.get('riverSegmentId'),
+      riverSegmentId,
+      riverSegmentName,
       capturedAt: formData.get('capturedAt'),
       latitude,
       longitude,
@@ -627,7 +850,7 @@ function taskRecordFromResult(result, payload) {
   const task = {
     id: fallbackId,
     segmentId: payload.riverSegmentId,
-    segmentName: segment?.name || '待补充河段',
+    segmentName: segment?.name || payload.riverSegmentName || '待补充河段',
     location: '新建上报',
     category: '待识别',
     sourceCategory: 'unknown',
@@ -651,7 +874,7 @@ function taskRecordFromResult(result, payload) {
   Object.assign(task, result || {}, {
     id: result?.id || fallbackId,
     segmentId: result?.segmentId ?? payload.riverSegmentId,
-    segmentName: result?.segmentName || segment?.name || '待补充河段',
+    segmentName: segment?.name || payload.riverSegmentName || result?.segmentName || '待补充河段',
     category: result?.modelCategory || result?.category || '待识别',
     risk: result?.modelRisk || result?.risk || '中',
     priority: result?.modelPriority || result?.priority || '高',
@@ -787,10 +1010,78 @@ function initCategoryChart() {
   chartInstances.push(chart);
 }
 
+const MAP_INTRO_HOLD_MS = 780; // 全屏大地图停留时长
+const MAP_INTRO_SHRINK_MS = 1250; // 缩小归位过渡时长
+
+/**
+ * 管理员入场动画：先全屏展示大地图（聚焦标点最密集地段），
+ * 再慢慢变淡、缩小回正常布局。
+ * readyPromise 用于等待地图首帧渲染完成——就绪前先藏起面板，避免放大一张空地图。
+ */
+function playMapIntro(enabled, readyPromise, afterShrink) {
+  state.mapIntro = false; // 仅播放一次
+  const finish = () => { if (afterShrink) afterShrink(); };
+  if (!enabled) return;
+  const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const frame = /** @type {HTMLElement|null} */ (document.querySelector('.map-frame'));
+  const shellEl = /** @type {HTMLElement|null} */ (document.querySelector('.app-shell'));
+  if (reduce || !frame || !shellEl) { window.setTimeout(finish, 240); return; }
+
+  // 地图就绪前先藏起面板并压上暗角：宁可短暂留白，也不要放大一张未加载的地图
+  frame.style.visibility = 'hidden';
+  const veil = document.createElement('div');
+  veil.className = 'map-intro-veil';
+  shellEl.append(veil);
+  document.body.classList.add('map-intro-active'); // 入场期间锁住滚动，避免放大后的地图撑出滚动条
+
+  const cleanup = () => {
+    frame.style.transition = '';
+    frame.style.transform = '';
+    frame.style.transformOrigin = '';
+    frame.style.visibility = '';
+    frame.classList.remove('map-frame-hero');
+    veil.remove();
+    document.body.classList.remove('map-intro-active');
+  };
+
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    const rect = frame.getBoundingClientRect();
+    if (!frame.isConnected || !rect.width || !rect.height) { cleanup(); finish(); return; }
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const scale = Math.max(vw / rect.width, vh / rect.height) * 1.015;
+    const offsetX = vw / 2 - (rect.left + rect.width / 2);
+    const offsetY = vh / 2 - (rect.top + rect.height / 2);
+
+    frame.style.transition = 'none';
+    frame.style.transformOrigin = 'center center';
+    frame.style.transform = `translate(${offsetX.toFixed(1)}px, ${offsetY.toFixed(1)}px) scale(${scale.toFixed(3)})`;
+    frame.style.visibility = 'visible';
+    frame.classList.add('map-frame-hero');
+
+    window.setTimeout(() => {
+      frame.style.transition = `transform ${MAP_INTRO_SHRINK_MS}ms cubic-bezier(.22,.61,.36,1)`;
+      frame.style.transform = 'none';
+      veil.classList.add('leaving');
+      window.setTimeout(() => { cleanup(); finish(); }, MAP_INTRO_SHRINK_MS + 90);
+    }, MAP_INTRO_HOLD_MS);
+  };
+
+  const guard = window.setTimeout(start, 2000); // 兜底：加载事件迟迟不来时也照常播放
+  Promise.resolve(readyPromise).then(() => { window.clearTimeout(guard); start(); }).catch(() => { window.clearTimeout(guard); start(); });
+}
+
 async function initMap() {
   const container = document.querySelector('#river-map');
   if (!container) return;
   const renderToken = mapRenderToken;
+  const intro = state.mapIntro; // 本次渲染是否播放全屏大地图入场
+  const focus = state.mapFocusTaskId;
+  const cluster = intro && !focus ? densestCluster(getMapTasks()) : null;
+  const initialView = cluster ? { lat: cluster.lat, lng: cluster.lng, zoom: cluster.count >= 4 ? 13 : 14 } : null;
   if (mapProvider === 'amap' && amapKey) {
     try {
       const nextAmapMap = await createAmapMap({
@@ -798,8 +1089,9 @@ async function initMap() {
         key: amapKey,
         securityCode: amapSecurityCode,
         tasks: getMapTasks(),
-        focusTaskId: state.mapFocusTaskId,
+        focusTaskId: focus,
         onTaskClick: openTask,
+        initialView,
       });
       if (renderToken !== mapRenderToken || !container.isConnected) {
         destroyAmapMap(nextAmapMap);
@@ -807,33 +1099,54 @@ async function initMap() {
       }
       amapMapInstance = nextAmapMap;
       state.mapFocusTaskId = null;
+      playMapIntro(intro, nextAmapMap.__ready, () => nextAmapMap.__fitAll?.());
       return;
     } catch (error) {
       if (renderToken !== mapRenderToken || !container.isConnected) return;
       showToast(`${error.message}，已切换为备用地图`, 'error');
     }
   }
-  mapInstance = L.map(container, { zoomControl: false }).setView([30.272, 120.169], 12);
+  mapInstance = L.map(container, { zoomControl: false }).setView([DEFAULT_REPORT_LOCATION.latitude, DEFAULT_REPORT_LOCATION.longitude], 12);
   L.control.zoom({ position: 'bottomright' }).addTo(mapInstance);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(mapInstance);
+  const tileLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(mapInstance);
+  const leafletReady = new Promise((resolve) => {
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; resolve(); } };
+    tileLayer.on('load', settle);
+    window.setTimeout(settle, 1800);
+  });
   mapInstance.on('popupopen', () => document.querySelector('[data-popup-task]')?.addEventListener('click', (event) => openTask(/** @type {HTMLElement} */ (event.currentTarget).dataset.popupTask)));
-  getMapTasks().forEach((task) => {
+  const mapTasks = getMapTasks();
+  const markers = [];
+  mapTasks.forEach((task) => {
     const tone = task.risk === '高' ? '#f0655e' : task.risk === '中' ? '#f0a03c' : '#2dd4a7';
     const marker = L.circleMarker([task.lat, task.lng], { radius: task.risk === '高' ? 10 : 8, color: '#fff', weight: 3, fillColor: tone, fillOpacity: 1 });
     marker.bindPopup(`<div class="map-popup"><span>${esc(task.segmentName)}</span><strong>${esc(task.category)}</strong><small>${esc(task.status)} · ${esc(task.due)}</small><button data-popup-task="${task.id}">查看任务</button></div>`).addTo(mapInstance);
-    if (task.id === state.mapFocusTaskId) {
+    markers.push(marker);
+    if (task.id === focus) {
       mapInstance.setView([task.lat, task.lng], 16);
       marker.openPopup();
     }
   });
+  const fitAll = () => {
+    if (markers.length) mapInstance.fitBounds(L.latLngBounds(mapTasks.map((task) => [task.lat, task.lng])), { padding: [40, 40], maxZoom: 15 });
+  };
+  if (!focus && initialView) {
+    mapInstance.setView([initialView.lat, initialView.lng], initialView.zoom || 13);
+  } else if (!focus && markers.length) {
+    fitAll();
+  }
   state.mapFocusTaskId = null;
   setTimeout(() => mapInstance?.invalidateSize(), 100);
+  playMapIntro(intro, leafletReady, fitAll);
 }
 
 async function bootstrap() {
   try {
+    preloadMap(); // 页面一打开就先预热地图 SDK，缩短进入管理员时的等待
     state.data = await api.getBootstrap();
     state.loading = false;
+    preloadMap(); // 数据到位：预热「标点最密集地段」的瓦片
     const urlRole = new URLSearchParams(location.search).get('role');
     state.role = urlRole === 'admin' || urlRole === 'patrol' ? urlRole : (isMobile ? 'patrol' : null); // ?role= 可直达；移动端默认巡河员；桌面进入身份门户
     const requestedView = location.hash.slice(1);
@@ -841,7 +1154,7 @@ async function bootstrap() {
     if (allowedIds.includes(requestedView)) {
       state.view = requestedView;
     } else {
-      state.view = state.role === 'patrol' ? 'report' : 'dashboard';
+      state.view = viewForRole[state.role] || 'map'; // 管理员默认大地图，巡河员默认上报
     }
     render();
     maybeShowCover();
